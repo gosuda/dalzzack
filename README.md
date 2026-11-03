@@ -67,8 +67,6 @@ Open a new terminal, then run `dalzzack --version`. Windows needs the WebView2 r
 
 To check a download, fetch the `.sha256` file with the same name. On macOS, run `shasum -a 256 -c dalzzack-macos-universal.tar.gz.sha256`. On Windows, compare its hash with `(Get-FileHash "$env:TEMP\dalzzack.zip").Hash`.
 
-Each release also has Tauri installers (`.msi`, `.exe`, `.dmg`). They do not put `dalzzack` on your `PATH`, so for the CLI use the archives above.
-
 ### Build from source (needs Rust)
 
 Pick whichever fits your setup. All three install the same binary to a directory on your `PATH`.
@@ -210,7 +208,7 @@ dalzzack <command> --help
 
 GitHub Actions workflows:
 - **CI** (`ci.yml`): format check, Clippy and unit tests (macOS), build (macOS, Windows), smoke test (macOS)
-- **Release** (`release.yml`): Tauri build on `v*` tags. It attaches the macOS and Windows installers and the plain binary archives (`dalzzack-macos-universal.tar.gz`, `dalzzack-windows-x64.zip`, each with a `.sha256` file) to the GitHub release. A tag with a hyphen, such as `v1.0.0-rc.1`, makes a pre-release, which the `releases/latest` links skip.
+- **Release** (`release.yml`): on `v*` tags, builds the binary with `tauri build --no-bundle` and attaches `dalzzack-macos-universal.tar.gz` and `dalzzack-windows-x64.zip`, each with a `.sha256` file, to the GitHub release. It publishes no installers: they did not put `dalzzack` on `PATH`. A tag with a hyphen, such as `v1.0.0-rc.1`, makes a pre-release, which the `releases/latest` links skip.
 
 ---
 

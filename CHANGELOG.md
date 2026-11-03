@@ -27,6 +27,10 @@ except for the changes below.
 
 ### Changed
 
+- Releases no longer carry the Tauri installers (`.msi`, `.exe`, `.dmg`). They
+  did not put `dalzzack` on `PATH`, and their shortcut ran it with no
+  arguments, which only prints the help. Use the archives above.
+
 - Renamed from TaskWeaver to dalzzack:
 
   | What | Before | Now |
