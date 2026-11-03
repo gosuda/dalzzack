@@ -1,0 +1,29 @@
+<!doctype html>
+<!--
+  Frame-targeting fixture — the naver shape at small scale:
+  two src-ful same-origin iframes (one with a >200-char SafeFrame-style name)
+  plus two JS-created srcless iframes. Serve over HTTP (test-cli.mjs does)
+  so the src frames are same-origin; file:// works too but origins differ.
+-->
+<html>
+<head><meta charset="utf-8"><title>frames-fixture-top</title></head>
+<body>
+<h1>frames fixture</h1>
+<iframe id="srcA" src="frames-child.html?a"></iframe>
+<iframe id="srcB" src="frames-child.html?b"
+  name='{"sf_ver":"1-0-40","ck_on":1,"flash_ver":"0","tgt":"_top","padding":"0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"}'></iframe>
+<script>
+  // Srcless, JS-created, same-origin — like naver's ad/tracker frames.
+  // No src attribute at all: these are the frames the old context-store
+  // indexing mismapped.
+  for (const id of ['jsC', 'jsD']) {
+    const f = document.createElement('iframe');
+    f.id = id;
+    document.body.appendChild(f);
+    f.contentDocument.open();
+    f.contentDocument.write('<p>' + id + '</p>');
+    f.contentDocument.close();
+  }
+</script>
+</body>
+</html>

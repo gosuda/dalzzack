@@ -1,0 +1,4 @@
+# Use the default target directory (src-tauri/target).
+# Previously this hard-coded a macOS-only absolute path,
+# which caused Windows builds to silently land in the wrong place — leaving a
+# stale dalzzack.exe in src-tauri/target/release that deploy.mjs kept copying.

@@ -1,0 +1,138 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #e0e0e0;
+  background-color: #0d1117;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.landing {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 32px;
+  gap: 20px;
+}
+
+.hero {
+  text-align: center;
+}
+
+.title {
+  font-size: 2.4rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #58a6ff, #bc8cff);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.subtitle {
+  margin-top: 6px;
+  font-size: 1rem;
+  color: #8b949e;
+  font-weight: 400;
+}
+
+.description {
+  max-width: 560px;
+  text-align: center;
+  color: #8b949e;
+  line-height: 1.6;
+}
+
+.description strong {
+  color: #c9d1d9;
+}
+
+.section-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #484f58;
+  margin-bottom: -12px;
+}
+
+.tools-grid {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+}
+
+.tools-grid.cols-3 {
+  grid-template-columns: repeat(3, 1fr);
+  max-width: 540px;
+}
+
+.tools-grid.cols-4 {
+  grid-template-columns: repeat(4, 1fr);
+  max-width: 540px;
+}
+
+.tool-card {
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-radius: 10px;
+  padding: 14px 8px;
+  text-align: center;
+  transition: border-color 0.2s;
+}
+
+.tool-card:hover {
+  border-color: #58a6ff;
+}
+
+.tool-icon {
+  font-size: 1.3rem;
+  margin-bottom: 4px;
+}
+
+.tool-card h3 {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #c9d1d9;
+  font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-card p {
+  font-size: 0.68rem;
+  color: #6e7681;
+}
+
+.footer {
+  text-align: center;
+  margin-top: 4px;
+}
+
+.status {
+  display: inline-block;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #3fb950;
+  padding: 4px 14px;
+  border: 1px solid #23863633;
+  border-radius: 20px;
+  background: #3fb95010;
+}
+
+.version {
+  margin-top: 6px;
+  font-size: 0.7rem;
+  color: #484f58;
+}

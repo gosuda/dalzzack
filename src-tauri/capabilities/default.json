@@ -1,0 +1,57 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capability",
+  "description": "Main window permissions for dalzzack",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["https://*", "http://*"]
+  },
+  "permissions": [
+    {
+      "identifier": "core:default"
+    },
+    {
+      "identifier": "core:webview:default"
+    },
+    {
+      "identifier": "core:window:default"
+    },
+    {
+      "identifier": "core:app:default"
+    },
+    {
+      "identifier": "core:event:default"
+    },
+    "core:event:allow-emit",
+    "core:event:allow-emit-to",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    {
+      "identifier": "core:path:default"
+    },
+
+    "core:webview:allow-create-webview",
+    "core:webview:allow-create-webview-window",
+    "core:webview:allow-get-all-webviews",
+    "core:webview:allow-set-webview-focus",
+    "core:webview:allow-set-webview-position",
+    "core:webview:allow-set-webview-size",
+    "core:webview:allow-set-webview-zoom",
+    "core:webview:allow-webview-close",
+    "core:webview:allow-webview-hide",
+    "core:webview:allow-webview-show",
+    "core:webview:allow-webview-position",
+    "core:webview:allow-webview-size",
+
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-set-title",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-set-focus"
+  ]
+}

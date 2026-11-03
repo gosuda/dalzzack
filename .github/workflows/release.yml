@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Release (${{ matrix.os }})
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            asset: dalzzack-macos-universal.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rust-targets: x86_64-pc-windows-msvc
+            asset: dalzzack-windows-x64.zip
+          # Linux is not a supported target: the Linux platform backend
+          # (src/platform/js_exec.rs, mouse.rs) is an unbuilt stub.
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # A tag with a hyphen (v1.0.0-rc.1) becomes a pre-release, which
+      # `releases/latest/download/...` skips, so the README links never point at it.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'dalzzack ${{ github.ref_name }}'
+          releaseBody: |
+            Install: https://github.com/${{ github.repository }}#install
+            Changes: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md
+
+            The plain binaries are `dalzzack-macos-universal.tar.gz` (Apple silicon and Intel) and `dalzzack-windows-x64.zip`, each with a `.sha256` file. The macOS binary is not notarized: if you download it in a browser, run `xattr -d com.apple.quarantine <path to dalzzack>` once. A download with `curl` does not need this.
+          releaseDraft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          args: --target ${{ matrix.target }}
+
+      # The Tauri installers do not put the binary on PATH, so the CLI install
+      # path is a plain archive with a fixed name: the README links to
+      # `releases/latest/download/<asset>`, which stays valid for every version.
+      - name: Package the plain binary (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          bin=src-tauri/target/${{ matrix.target }}/release/dalzzack
+          test -x "$bin"
+          lipo -info "$bin"
+          codesign --force --sign - "$bin"
+          tar -czf "${{ matrix.asset }}" -C "$(dirname "$bin")" dalzzack
+          shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+      - name: Package the plain binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = "src-tauri/target/${{ matrix.target }}/release/dalzzack.exe"
+          if (-not (Test-Path $bin)) { throw "missing $bin" }
+          Compress-Archive -Path $bin -DestinationPath "${{ matrix.asset }}"
+          $hash = (Get-FileHash "${{ matrix.asset }}" -Algorithm SHA256).Hash.ToLower()
+          # LF, not Set-Content's CRLF: `sha256sum -c` reads the CR as part of the file name.
+          $sha = Join-Path $PWD "${{ matrix.asset }}.sha256"
+          [IO.File]::WriteAllText($sha, "$hash  ${{ matrix.asset }}`n")
+      - name: Attach the plain binary to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" "${{ matrix.asset }}" "${{ matrix.asset }}.sha256" --clobber --repo "$GITHUB_REPOSITORY"

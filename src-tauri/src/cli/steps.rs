@@ -1,0 +1,267 @@
+//! Batch step execution engine — runs a JSON steps file to completion.
+//!
+//! Self-contained: starts browser → runs all steps → prints results → exits.
+
+use std::path::Path;
+
+/// Step definition in the JSON file
+#[derive(serde::Deserialize, Debug)]
+struct StepDef {
+    tool: String,
+    args: Option<serde_json::Value>,
+}
+
+/// Steps file format
+#[derive(serde::Deserialize, Debug)]
+struct StepsFile {
+    #[allow(dead_code)]
+    name: Option<String>,
+    steps: Vec<StepDef>,
+}
+
+/// Run batch steps: start a Tauri WebView, execute steps, exit.
+pub fn run_steps(instance_id: &str, steps_path: &Path) {
+    // Read and parse steps file
+    let content = match std::fs::read_to_string(steps_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "status": "failed",
+                    "error": format!("Cannot read steps file '{}': {}", steps_path.display(), e),
+                })
+            );
+            std::process::exit(1);
+        }
+    };
+
+    // Expand $ENV_VAR references in the content
+    let content = expand_env_vars(&content);
+
+    let steps_file: StepsFile = match serde_json::from_str(&content) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "status": "failed",
+                    "error": format!("Invalid steps JSON: {}", e),
+                })
+            );
+            std::process::exit(1);
+        }
+    };
+
+    if steps_file.steps.is_empty() {
+        println!(
+            "{}",
+            serde_json::json!({ "status": "completed", "message": "No steps to execute" })
+        );
+        return;
+    }
+
+    // Setup logging
+    crate::setup_panic_hook();
+    let _log_guard = crate::init_file_logging(Some(instance_id));
+
+    tracing::info!(
+        "=== dalzzack Batch Run Starting (id: {}, steps: {}) ===",
+        instance_id,
+        steps_file.steps.len()
+    );
+
+    let steps = steps_file.steps;
+    let id_clone = instance_id.to_string();
+    let id_for_gui = instance_id.to_string();
+
+    // Spawn step execution in a background thread (needs tokio runtime)
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+        rt.block_on(async {
+            // Wait for WebView to be ready
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+            // CDP setup
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            {
+                if let Err(e) = crate::setup_cdp().await {
+                    tracing::warn!("[Steps] CDP setup failed: {}", e);
+                }
+            }
+
+            // A batch run uses the same shared WebView2 profile a plain daemon
+            // does. Saying so is what lets the shared-profile guard refuse a
+            // `cookies` clear or `reset` step that would wipe every live
+            // daemon's logins.
+            crate::profile::set(crate::profile::Profile {
+                kind: if cfg!(target_os = "windows") {
+                    crate::profile::Kind::Shared
+                } else {
+                    crate::profile::Kind::Platform
+                },
+                path: if cfg!(target_os = "windows") {
+                    crate::profile::default_webview_dir()
+                } else {
+                    None
+                },
+                disposable: false,
+            });
+
+            // The same always-on capture a daemon arms, so console-logs,
+            // response-headers, nav-log and failed-requests steps have
+            // something to read.
+            #[cfg(target_os = "windows")]
+            {
+                use crate::recording::cdp::Mode;
+                match crate::recording::cdp::enable_and_subscribe(Mode::Console).await {
+                    Ok(()) => crate::console::set_transport(crate::console::Transport::Cdp),
+                    Err(e) => {
+                        tracing::warn!("[Steps] CDP capture unavailable: {e}");
+                        crate::console::set_transport_error(
+                            crate::console::Transport::Unavailable,
+                            &e,
+                        );
+                    }
+                }
+            }
+
+            let mut results = Vec::new();
+            let mut failed = false;
+
+            for (i, step) in steps.iter().enumerate() {
+                let mut args = step.args.clone().unwrap_or(serde_json::json!({}));
+                // Auto-inject "site" from instance_id if not present
+                if let Some(obj) = args.as_object_mut() {
+                    if !obj.contains_key("site") {
+                        obj.insert(
+                            "site".to_string(),
+                            serde_json::Value::String(id_clone.clone()),
+                        );
+                    }
+                }
+                tracing::info!("[Step {}/{}] {} {:?}", i + 1, steps.len(), step.tool, args);
+
+                let result = crate::tools::definitions::execute_tool(&step.tool, &args).await;
+
+                match result {
+                    Ok(output) => {
+                        let step_result = serde_json::json!({
+                            "step": i + 1,
+                            "tool": step.tool,
+                            "status": "completed",
+                            "result": output,
+                        });
+                        println!(
+                            "{}",
+                            serde_json::to_string(&step_result).unwrap_or_default()
+                        );
+                        results.push(step_result);
+                    }
+                    Err(e) => {
+                        let step_result = serde_json::json!({
+                            "step": i + 1,
+                            "tool": step.tool,
+                            "status": "failed",
+                            "error": e.to_string(),
+                        });
+                        println!(
+                            "{}",
+                            serde_json::to_string(&step_result).unwrap_or_default()
+                        );
+                        results.push(step_result);
+                        failed = true;
+                        break; // Stop on first failure
+                    }
+                }
+            }
+
+            // Print summary
+            let summary = serde_json::json!({
+                "status": if failed { "failed" } else { "completed" },
+                "steps_executed": results.len(),
+                "steps_total": steps.len(),
+            });
+            println!("{}", serde_json::to_string(&summary).unwrap_or_default());
+
+            // Exit after completion
+            std::process::exit(if failed { 1 } else { 0 });
+        });
+    });
+
+    // Run the Tauri GUI (blocks until window closes or process exits)
+    crate::run_with_instance_id(crate::app::AppOptions {
+        instance_id: Some(id_for_gui),
+        ..Default::default()
+    });
+}
+
+/// Expand $ENV_VAR and ${ENV_VAR} references in a string using environment variables.
+fn expand_env_vars(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        if chars[i] == '$' && i + 1 < len {
+            if chars[i + 1] == '{' {
+                // ${VAR} form
+                if let Some(end) = chars[i + 2..].iter().position(|&c| c == '}') {
+                    let var_name: String = chars[i + 2..i + 2 + end].iter().collect();
+                    match std::env::var(&var_name) {
+                        Ok(val) => result.push_str(&val),
+                        Err(_) => {
+                            // Keep original if not found
+                            result.push('$');
+                            result.push('{');
+                            result.push_str(&var_name);
+                            result.push('}');
+                        }
+                    }
+                    i += 3 + end; // skip ${VAR}
+                    continue;
+                }
+            } else if chars[i + 1].is_ascii_alphabetic() || chars[i + 1] == '_' {
+                // $VAR form
+                let start = i + 1;
+                let mut end = start;
+                while end < len && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                    end += 1;
+                }
+                let var_name: String = chars[start..end].iter().collect();
+                match std::env::var(&var_name) {
+                    Ok(val) => result.push_str(&val),
+                    Err(_) => {
+                        result.push('$');
+                        result.push_str(&var_name);
+                    }
+                }
+                i = end;
+                continue;
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_expand_env_vars() {
+        std::env::set_var("TEST_VAR", "hello");
+        assert_eq!(expand_env_vars("$TEST_VAR world"), "hello world");
+        assert_eq!(expand_env_vars("${TEST_VAR} world"), "hello world");
+        assert_eq!(expand_env_vars("no vars here"), "no vars here");
+        assert_eq!(
+            expand_env_vars("$NONEXISTENT_VAR_12345"),
+            "$NONEXISTENT_VAR_12345"
+        );
+        std::env::remove_var("TEST_VAR");
+    }
+}
