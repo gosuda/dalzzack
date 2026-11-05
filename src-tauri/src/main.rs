@@ -614,6 +614,21 @@ enum Cli {
         max_length: Option<u64>,
     },
 
+    /// Get the visible text of the page or one element. This is the cheapest way
+    /// to read a page.
+    #[command(name = "get-text")]
+    GetText {
+        /// Instance ID
+        #[arg(long, short, default_value = "")]
+        id: String,
+        /// CSS selector (default: full page)
+        #[arg(long)]
+        selector: Option<String>,
+        /// Cut the text to N bytes
+        #[arg(long)]
+        max_length: Option<u64>,
+    },
+
     /// Get current page URL and title
     #[command(name = "get-url")]
     GetUrl {
@@ -1908,6 +1923,15 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
                 "strip_noise": strip_noise || !no_strip_noise,
                 "max_length": max_length,
             }),
+        ),
+        Cli::GetText {
+            id,
+            selector,
+            max_length,
+        } => (
+            id,
+            "get_text".into(),
+            serde_json::json!({ "selector": selector, "max_length": max_length }),
         ),
         Cli::GetUrl { id } => (id, "get_current_url".into(), serde_json::json!({})),
         Cli::WaitFor {

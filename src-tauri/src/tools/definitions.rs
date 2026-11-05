@@ -206,6 +206,19 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
 
         ToolDefinition {
+            name: "get_text".to_string(),
+            description: "Return the visible text of the page or one element. Use this to read a page: it is several times smaller than HTML and has the actual words, which a screenshot does not.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "site": site_param(),
+                    "selector": { "type": "string", "description": "CSS selector to scope to a single element (default: whole page)." },
+                    "max_length": { "type": "integer", "description": "Cut the text to N bytes (0 = unlimited)." }
+                }
+            }),
+        },
+
+        ToolDefinition {
             name: "get_html".to_string(),
             description: "Return the HTML of the current page or a specific element. Prefer `screenshot` or `describe` for visual understanding; use this only when you need a value that cannot be seen on screen (hidden tokens, raw text, attribute data).".to_string(),
             input_schema: serde_json::json!({
@@ -998,6 +1011,7 @@ pub async fn execute_tool(name: &str, args: &Value) -> Result<Value> {
     match name {
         "navigate" => tool_navigate(args).await,
         "get_html" => tool_get_html(args).await,
+        "get_text" => tool_get_text(args).await,
         "execute_js" => tool_execute_js(args).await,
         "screenshot" => tool_screenshot(args).await,
         "wait" => tool_wait(args).await,
@@ -1989,6 +2003,77 @@ async fn tool_get_html(args: &Value) -> Result<Value> {
                 "message": "No element matched the selector"
             })),
         },
+        Err(e) => Ok(serde_json::json!({
+            "status": "failed",
+            "error": "JS_EXECUTION_ERROR",
+            "message": e
+        })),
+    }
+}
+
+/// Text without trailing spaces, and with one blank line where a page has many.
+fn tidy_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut after_blank = true;
+    for line in text.lines().map(str::trim_end) {
+        if !line.is_empty() {
+            out.push_str(line);
+            out.push('\n');
+        } else if !after_blank {
+            out.push('\n');
+        }
+        after_blank = line.is_empty();
+    }
+    out.truncate(out.trim_end().len());
+    out
+}
+
+/// The longest start of `text` that fits in `max` bytes.
+fn cut_text(text: &str, max: usize) -> &str {
+    let end = (0..=max.min(text.len()))
+        .rev()
+        .find(|i| text.is_char_boundary(*i))
+        .unwrap_or(0);
+    &text[..end]
+}
+
+/// get_text — the visible text of the page or one element.
+async fn tool_get_text(args: &Value) -> Result<Value> {
+    let selector = args["selector"].as_str();
+    let max_length = args["max_length"].as_u64().unwrap_or(0) as usize;
+
+    if !is_webview_ready().await {
+        return Ok(serde_json::json!({
+            "status": "failed",
+            "error": "WEBVIEW_NOT_FOUND",
+            "message": "WebView not ready"
+        }));
+    }
+
+    let element = match selector {
+        Some(selector) => format!("document.querySelector({})", Value::from(selector)),
+        None => "document.body".to_string(),
+    };
+    let script = format!("var el = {element}; return el ? el.innerText : null;");
+    match webview_execute_js(&script, Some(10000)).await {
+        Ok(Value::Null) => Ok(serde_json::json!({
+            "status": "failed",
+            "error": "SELECTOR_NOT_FOUND",
+            "message": format!("No element matched the selector: {}", selector.unwrap_or("body"))
+        })),
+        Ok(value) => {
+            let text = tidy_text(value.as_str().unwrap_or_default());
+            let truncated = max_length > 0 && text.len() > max_length;
+            let mut response = serde_json::json!({
+                "status": "completed",
+                "text": if truncated { cut_text(&text, max_length) } else { &text },
+                "length": text.len()
+            });
+            if truncated {
+                response["truncated"] = serde_json::json!(true);
+            }
+            Ok(response)
+        }
         Err(e) => Ok(serde_json::json!({
             "status": "failed",
             "error": "JS_EXECUTION_ERROR",
@@ -5875,6 +5960,23 @@ mod tests {
         assert!(result.contains("Before"));
         assert!(result.contains("After"));
         assert!(!result.contains("var x"));
+    }
+
+    #[test]
+    fn page_text_loses_only_empty_space() {
+        assert_eq!(
+            tidy_text("\n\n제목  \n\n\n\n본문\t\n  둘째 줄\n\n"),
+            "제목\n\n본문\n  둘째 줄"
+        );
+        assert_eq!(tidy_text(""), "");
+    }
+
+    #[test]
+    fn text_is_cut_between_characters() {
+        assert_eq!(cut_text("가나다", 4), "가");
+        assert_eq!(cut_text("가나다", 6), "가나");
+        assert_eq!(cut_text("abc", 2), "ab");
+        assert_eq!(cut_text("abc", 9), "abc");
     }
 
     #[test]
