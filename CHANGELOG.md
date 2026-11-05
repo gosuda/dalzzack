@@ -6,6 +6,21 @@ All notable changes to dalzzack. The format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- `dalzzack install codex-project` writes `./AGENTS.md`, as `install codex` did
+  before.
+
+### Changed
+
+- `dalzzack install codex` and `dalzzack install all` now write the global Codex
+  file, `~/.codex/AGENTS.md` or `$CODEX_HOME/AGENTS.md`, instead of `./AGENTS.md`
+  in the current folder. Codex reads the global file in every project and reads
+  all of it. It cuts project files at 32 KiB, which is less than the size of the
+  guide, and it does not read them in untrusted projects. If an earlier version
+  wrote the guide into a project, delete the block between
+  `<!-- dalzzack-begin -->` and `<!-- dalzzack-end -->` from that `AGENTS.md`.
+
 ## [1.0.0] - 2026-11-03
 
 First public release.

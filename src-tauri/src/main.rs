@@ -1157,10 +1157,11 @@ enum Cli {
 
     /// Inject dalzzack usage docs into AI agent config files.
     /// claude-code → ~/.claude/CLAUDE.md (global, all projects)
-    /// codex → ./AGENTS.md (current project)
-    /// all → both
+    /// codex → ~/.codex/AGENTS.md or $CODEX_HOME/AGENTS.md (global, all projects)
+    /// codex-project → ./AGENTS.md (current project; Codex reads only its first 32 KiB)
+    /// all → claude-code + codex
     Install {
-        /// Target agent: claude-code, codex, or all
+        /// Target agent: claude-code, codex, codex-project, or all
         target: String,
     },
 
@@ -3002,6 +3003,14 @@ fn home_dir() -> std::path::PathBuf {
         })
 }
 
+/// Where Codex keeps its global files: `$CODEX_HOME`, else `~/.codex`.
+fn codex_home() -> PathBuf {
+    std::env::var_os("CODEX_HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".codex"))
+}
+
 fn install_docs(target: &str) {
     match target {
         "claude-code" | "claude" => {
@@ -3019,6 +3028,20 @@ fn install_docs(target: &str) {
             );
         }
         "codex" => {
+            let path = codex_home().join("AGENTS.md");
+            eprintln!("Installing for Codex (global)...");
+            inject_docs(&path, &path.display().to_string());
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "completed",
+                    "target": "codex",
+                    "file": path.display().to_string(),
+                    "message": "dalzzack docs injected into the global Codex AGENTS.md (all projects)"
+                })
+            );
+        }
+        "codex-project" => {
             let path = std::path::PathBuf::from("AGENTS.md");
             eprintln!("Installing for Codex (current project)...");
             inject_docs(&path, "AGENTS.md");
@@ -3027,7 +3050,7 @@ fn install_docs(target: &str) {
                 "{}",
                 serde_json::json!({
                     "status": "completed",
-                    "target": "codex",
+                    "target": "codex-project",
                     "file": abs.display().to_string(),
                     "message": "dalzzack docs injected into ./AGENTS.md (current project)"
                 })
@@ -3035,24 +3058,23 @@ fn install_docs(target: &str) {
         }
         "all" => {
             let claude_path = home_dir().join(".claude").join("CLAUDE.md");
-            let codex_path = std::path::PathBuf::from("AGENTS.md");
+            let codex_path = codex_home().join("AGENTS.md");
             eprintln!("Installing for all agents...");
             inject_docs(&claude_path, "~/.claude/CLAUDE.md");
-            inject_docs(&codex_path, "AGENTS.md");
-            let codex_abs = codex_path.canonicalize().unwrap_or(codex_path);
+            inject_docs(&codex_path, &codex_path.display().to_string());
             println!(
                 "{}",
                 serde_json::json!({
                     "status": "completed",
                     "targets": ["claude-code", "codex"],
-                    "files": [claude_path.display().to_string(), codex_abs.display().to_string()],
-                    "message": "dalzzack docs injected into ~/.claude/CLAUDE.md + ./AGENTS.md"
+                    "files": [claude_path.display().to_string(), codex_path.display().to_string()],
+                    "message": "dalzzack docs injected into the global Claude Code and Codex files (all projects)"
                 })
             );
         }
         _ => {
             eprintln!(
-                "Unknown target: '{}'. Use: claude-code, codex, or all",
+                "Unknown target: '{}'. Use: claude-code, codex, codex-project, or all",
                 target
             );
             std::process::exit(1);

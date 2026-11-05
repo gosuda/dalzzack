@@ -178,10 +178,13 @@ This is `describe` on a sign-in page. Every interactive element gets a number, a
 Write the usage guide into your agent's instruction file:
 
 ```bash
-dalzzack install claude-code   # ~/.claude/CLAUDE.md (global, all projects)
-dalzzack install codex         # ./AGENTS.md (current project)
-dalzzack install all           # both
+dalzzack install claude-code     # ~/.claude/CLAUDE.md (global, all projects)
+dalzzack install codex           # ~/.codex/AGENTS.md or $CODEX_HOME/AGENTS.md (global, all projects)
+dalzzack install all             # both
+dalzzack install codex-project   # ./AGENTS.md (current project)
 ```
+
+Use `codex-project` only when you want the guide in one repository. Codex reads only the first 32 KiB of project files, and the guide is longer than that. To read all of it, set `project_doc_max_bytes = 65536` in `~/.codex/config.toml`. The global file has no such limit.
 
 The guide sits between `<!-- dalzzack-begin -->` and `<!-- dalzzack-end -->`. Running the command again replaces that block with the current guide, so run it again after an upgrade. For other agents, copy [AGENTS.md](AGENTS.md) into their instruction file.
 

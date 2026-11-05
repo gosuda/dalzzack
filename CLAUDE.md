@@ -7,8 +7,8 @@ guide is [CONTRIBUTING.md](CONTRIBUTING.md).
 - Test: `cd src-tauri && cargo test --lib --bins`
 - Lint: `cd src-tauri && cargo fmt && cargo clippy --all-targets -- -D warnings`
 - `AGENTS.md` is generated. It must stay identical to the `DALZZACK_DOCS` block in
-  `src-tauri/src/main.rs`. Edit the constant, then run `dalzzack install codex` in
-  the repo root.
+  `src-tauri/src/main.rs`. Edit the constant, then run
+  `dalzzack install codex-project` in the repo root.
 
 How an agent uses the CLI:
 
