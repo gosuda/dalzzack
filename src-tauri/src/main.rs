@@ -3171,7 +3171,7 @@ mod tests {
 
     #[test]
     fn the_guide_replaces_its_own_block_and_leaves_the_rest() {
-        let file = format!("# Mine\r\n\r\n{BLOCK_BEGIN}\nold\n{BLOCK_END}\n\n# Also mine\n");
+        let file = format!("# Mine\r\n\r\n{BLOCK_BEGIN}\nOLD GUIDE\n{BLOCK_END}\n\n# Also mine\n");
         let updated = with_docs(&file).unwrap();
         assert!(updated.starts_with("# Mine\r\n\r\n"));
         assert!(updated.ends_with("\n# Also mine\n"));
