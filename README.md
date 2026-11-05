@@ -34,38 +34,52 @@ So `describe` and `screenshot` are the recommended primitives. Use `get-html` on
 
 ## Install
 
-### Prebuilt binary (no Rust needed)
-
-Each [GitHub release](https://github.com/gosuda/dalzzack/releases) has a plain binary for macOS (universal: Apple silicon and Intel) and for Windows (x64), each with a `.sha256` file.
-
 macOS:
 
 ```bash
-curl -fsSLO https://github.com/gosuda/dalzzack/releases/latest/download/dalzzack-macos-universal.tar.gz
-tar -xzf dalzzack-macos-universal.tar.gz
-sudo mkdir -p /usr/local/bin && sudo mv dalzzack /usr/local/bin/
-dalzzack --version
-```
-
-The macOS binary is not notarized by Apple. A file that `curl` downloads runs as it is. If you downloaded the archive in a browser, macOS blocks the binary until you clear its quarantine flag, once for each download:
-
-```bash
-xattr -d com.apple.quarantine /usr/local/bin/dalzzack
+curl -fsSL https://raw.githubusercontent.com/gosuda/dalzzack/main/scripts/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-$dir = "$env:LOCALAPPDATA\Programs\dalzzack"
-Invoke-WebRequest https://github.com/gosuda/dalzzack/releases/latest/download/dalzzack-windows-x64.zip -OutFile "$env:TEMP\dalzzack.zip"
-Expand-Archive "$env:TEMP\dalzzack.zip" -DestinationPath $dir -Force
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if (($userPath -split ";") -notcontains $dir) { [Environment]::SetEnvironmentVariable("Path", "$userPath;$dir", "User") }
+irm https://raw.githubusercontent.com/gosuda/dalzzack/main/scripts/install.ps1 | iex
 ```
 
-Open a new terminal, then run `dalzzack --version`. Windows needs the WebView2 runtime, which Windows 11 already has. If you downloaded the zip in a browser and Windows blocks the program, run `Unblock-File "$env:LOCALAPPDATA\Programs\dalzzack\dalzzack.exe"` once.
+Then open a new terminal and give your agents the usage guide:
 
-To check a download, fetch the `.sha256` file with the same name. On macOS, run `shasum -a 256 -c dalzzack-macos-universal.tar.gz.sha256`. On Windows, compare its hash with `(Get-FileHash "$env:TEMP\dalzzack.zip").Hash`.
+```bash
+dalzzack --version
+dalzzack install all
+```
+
+The script downloads the latest [release](https://github.com/gosuda/dalzzack/releases), checks its SHA-256 hash, installs the binary, and adds it to your `PATH`. It needs no Rust, no Node.js, and no administrator rights. To read it before you run it, see [install.sh](scripts/install.sh) and [install.ps1](scripts/install.ps1).
+
+| | macOS (universal) | Windows (x64) |
+|---|---|---|
+| Binary | `~/.local/bin/dalzzack` | `%LOCALAPPDATA%\Programs\dalzzack\dalzzack.exe` |
+| `PATH` change | One line in `~/.zshenv`, or in your bash profile | Your user `Path` |
+
+To change this, set these environment variables before you run the script:
+
+- `DALZZACK_INSTALL_DIR`: the folder for the binary. Use a folder you can write to, because daemon logs go next to the binary.
+- `DALZZACK_NO_MODIFY_PATH=1`: do not change `PATH`.
+
+Windows needs the WebView2 runtime, which Windows 11 already has.
+
+### Manual download
+
+Each [GitHub release](https://github.com/gosuda/dalzzack/releases) has `dalzzack-macos-universal.tar.gz` and `dalzzack-windows-x64.zip`, each with a `.sha256` file. Extract the binary into a folder on your `PATH`.
+
+To check a download, fetch the `.sha256` file with the same name. On macOS, run `shasum -a 256 -c dalzzack-macos-universal.tar.gz.sha256`. On Windows, compare its hash with `(Get-FileHash dalzzack-windows-x64.zip).Hash`.
+
+The macOS binary is not notarized by Apple. A file that `curl` downloads runs as it is. If you downloaded the archive in a browser, macOS blocks the binary until you clear its quarantine flag, once for each download:
+
+```bash
+xattr -d com.apple.quarantine <path to dalzzack>
+```
+
+If you downloaded the zip in a browser and Windows blocks the program, run `Unblock-File <path to dalzzack.exe>` once.
 
 ### Build from source (needs Rust)
 
@@ -90,7 +104,7 @@ Platforms: macOS (WKWebView) and Windows (WebView2). Linux (WebKitGTK) code exis
 
 ### Updating
 
-A prebuilt binary updates the way you installed it: run the install commands again. Stop running daemons first (`dalzzack list`, then `dalzzack stop --id <id>`), because Windows cannot replace a `dalzzack.exe` that is running.
+To update a prebuilt binary, run the install command again, then run `dalzzack install all` so the guide matches. Running daemons keep the old version until you stop them (`dalzzack list`, then `dalzzack stop --id <id>`). For a manual download, stop them first, because Windows cannot overwrite a `dalzzack.exe` that is running.
 
 For a build from source, the simplest path is the self-update command. It needs cargo; without it, it fails with `cargo_not_found` and prints the download link instead. It stops any running daemons, then runs `cargo install --force` against the URL baked into the binary at build time:
 
