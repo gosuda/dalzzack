@@ -22,7 +22,9 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
+          # A release candidate carries the version of the release it leads to.
           want="${TAG#v}"
+          want="${want%%-*}"
           for found in \
             "$(jq -r .version package.json)" \
             "$(jq -r .version src-tauri/tauri.conf.json)" \

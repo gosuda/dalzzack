@@ -1173,8 +1173,8 @@ enum Cli {
         /// Install this release tag and not the latest: a release candidate or a rollback.
         #[arg(long, conflicts_with_all = ["path", "git", "rev", "no_locked"])]
         tag: Option<String>,
-        /// Build from this folder with `cargo install --path`.
-        /// Point this at the repo root or `src-tauri/`.
+        /// Build from this folder with `cargo install --path`: the `src-tauri`
+        /// folder of a clone.
         #[arg(long)]
         path: Option<PathBuf>,
         /// Build from this repository with `cargo install --git`.

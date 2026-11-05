@@ -198,16 +198,25 @@ async fn fetch_release(repo: &str, tag: &str, asset: &str, work: &Path) -> Resul
     Ok(binary)
 }
 
+/// What `--version` prints for a tag. A release candidate carries the version of
+/// the release it leads to, so `v1.1.0-rc.1` is a build of 1.1.0.
+fn version_line(tag: &str) -> Result<String, Value> {
+    let version = version_of(tag)?;
+    Ok(format!(
+        "dalzzack {}.{}.{}",
+        version.major, version.minor, version.patch
+    ))
+}
+
 /// The new binary must run, and must be the version the tag promises.
 fn check_binary(binary: &Path, tag: &str) -> Result<(), Value> {
-    let version = tag.trim_start_matches('v');
     let hint = "Nothing was changed.";
     let output = Command::new(binary)
         .arg("--version")
         .output()
         .map_err(|e| failure("invalid_release", format!("it does not run: {e}"), hint))?;
     let printed = String::from_utf8_lossy(&output.stdout);
-    if printed.trim() == format!("dalzzack {version}") {
+    if printed.trim() == version_line(tag)? {
         return Ok(());
     }
     Err(failure(
@@ -266,21 +275,23 @@ fn is_dev_build(exe: &Path) -> bool {
 }
 
 /// Rewrite the guide with the new binary, so that it matches the new commands.
-fn refresh_guides(binary: &Path) -> Value {
+fn refresh_guides(report: &mut Value, binary: &Path) {
     let output = Command::new(binary)
         .args(["install", "--refresh"])
         .stderr(Stdio::null())
         .output();
-    let report = output
+    let refreshed = output
         .ok()
         .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
         .unwrap_or_default();
-    match report["status"].as_str() {
-        Some("completed") => json!({ "guides_refreshed": report["refreshed"] }),
-        _ => json!({ "warning": format!(
-            "The installed guides were not refreshed. Run `dalzzack install --refresh`. {}",
-            report["message"].as_str().unwrap_or_default()
-        )}),
+    match refreshed["status"].as_str() {
+        Some("completed") => report["guides_refreshed"] = refreshed["refreshed"].clone(),
+        _ => {
+            report["warning"] = json!(format!(
+                "The installed guides were not refreshed. Run `dalzzack install --refresh`. {}",
+                refreshed["message"].as_str().unwrap_or_default()
+            ))
+        }
     }
 }
 
@@ -325,14 +336,14 @@ fn from_release(options: &Options) -> Result<Value, Value> {
         return Err(failure(
             "dev_build",
             format!("{} is a cargo build", target.display()),
-            "Use `upgrade --path <repo>` to install from source.",
+            "Use `upgrade --path <repo>/src-tauri` to install from source.",
         ));
     }
     let Some(asset) = RELEASE_ASSET else {
         return Err(failure(
             "no_release_asset",
             "Releases have no binary for this platform.",
-            "Use `upgrade --path <repo>` or `upgrade --git <url>` to build from source.",
+            "Use `upgrade --path <repo>/src-tauri` or `upgrade --git <url>` to build from source.",
         ));
     };
     let alive = list_running_instance_ids();
@@ -371,12 +382,7 @@ fn from_release(options: &Options) -> Result<Value, Value> {
         "installed_to": crate::state::printable_path(&target),
         "stopped_daemons": alive,
     });
-    if let (Some(out), Some(guides)) = (
-        out.as_object_mut(),
-        refresh_guides(&target).as_object().cloned(),
-    ) {
-        out.extend(guides);
-    }
+    refresh_guides(&mut out, &target);
     Ok(out)
 }
 
@@ -557,6 +563,7 @@ fn from_source(options: Options) -> Result<Value, Value> {
         )
         .into();
     }
+    refresh_guides(&mut out, &install_target);
     Ok(out)
 }
 
@@ -815,6 +822,12 @@ mod tests {
             sha256_of(&file).unwrap(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn a_release_candidate_is_a_build_of_its_release() {
+        assert_eq!(version_line("v1.1.0").unwrap(), "dalzzack 1.1.0");
+        assert_eq!(version_line("v1.1.0-rc.1").unwrap(), "dalzzack 1.1.0");
     }
 
     #[test]
