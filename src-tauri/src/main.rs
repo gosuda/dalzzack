@@ -1204,6 +1204,15 @@ enum Cli {
         steps: PathBuf,
     },
 
+    /// Print a part of the usage guide. With no topic, list the topics.
+    Guide {
+        /// The topic to print
+        topic: Option<String>,
+        /// Print every topic
+        #[arg(long, conflicts_with = "topic")]
+        all: bool,
+    },
+
     /// Inject dalzzack usage docs into AI agent config files.
     /// claude-code → ~/.claude/CLAUDE.md (global, all projects)
     /// codex → ~/.codex/AGENTS.md or $CODEX_HOME/AGENTS.md (global, all projects)
@@ -1557,7 +1566,7 @@ fn main() {
     if filter.is_active()
         && matches!(
             cli,
-            Cli::Run { .. } | Cli::Install { .. } | Cli::Daemon { .. }
+            Cli::Run { .. } | Cli::Guide { .. } | Cli::Install { .. } | Cli::Daemon { .. }
         )
     {
         println!(
@@ -1566,7 +1575,7 @@ fn main() {
                 "status": "failed",
                 "error": "USAGE",
                 "message": "--field/--jq apply to commands that print one JSON document; run, \
-                            install and daemon print several",
+                            guide, install and daemon do not",
             })
         );
         std::process::exit(2);
@@ -1717,6 +1726,7 @@ fn main() {
                 }
             }
         }
+        Cli::Guide { topic, all } => print_guide(topic.as_deref(), all),
         Cli::Install { target, refresh } => match target {
             Some(target) if !refresh => install_docs(&target),
             _ => refresh_docs(),
@@ -1832,6 +1842,7 @@ fn command_step(line: &serde_json::Value) -> Result<dalzzack_lib::cli::Step, Str
             | Cli::List
             | Cli::Daemon { .. }
             | Cli::Run { .. }
+            | Cli::Guide { .. }
             | Cli::Install { .. }
             | Cli::Tools { .. }
             | Cli::Upgrade { .. }
@@ -2572,6 +2583,7 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
         | Cli::List
         | Cli::Daemon { .. }
         | Cli::Run { .. }
+        | Cli::Guide { .. }
         | Cli::Install { .. }
         | Cli::Tools { .. }
         | Cli::Upgrade { .. } => {
@@ -2580,266 +2592,102 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
     }
 }
 
-const DALZZACK_DOCS: &str = r##"<!-- dalzzack-begin -->
-## Browser Automation (dalzzack)
+const DALZZACK_DOCS: &str = concat!(
+    "<!-- dalzzack-begin -->\n",
+    include_str!("../guide/core.md"),
+    "<!-- dalzzack-end -->\n"
+);
 
-`dalzzack` is a browser automation CLI. It spawns a real browser window and controls it via commands.
+/// The parts of the guide that `install` leaves out, so that an agent pays for
+/// them only when it needs them: name, what it covers, text.
+const GUIDE_TOPICS: [(&str, &str, &str); 11] = [
+    (
+        "instance",
+        "start, stop, list, reset, resize, upgrade, install",
+        include_str!("../guide/instance.md"),
+    ),
+    (
+        "navigate",
+        "navigate, reload, get-text, get-html, and whether a page really loaded",
+        include_str!("../guide/navigate.md"),
+    ),
+    (
+        "interact",
+        "click, hover, fill-form, keyboard, scroll, upload-file, save-image",
+        include_str!("../guide/interact.md"),
+    ),
+    (
+        "inspect",
+        "describe, wait-for, nav-log, failed-requests, response-headers, console-logs, cookies",
+        include_str!("../guide/inspect.md"),
+    ),
+    (
+        "advanced",
+        "exec-js, service workers, get-requests, frames, run",
+        include_str!("../guide/advanced.md"),
+    ),
+    (
+        "intercept",
+        "make requests hang, wait, fail, or return a mock",
+        include_str!("../guide/intercept.md"),
+    ),
+    (
+        "inject",
+        "run a script before the page's own code",
+        include_str!("../guide/inject.md"),
+    ),
+    (
+        "diagnostics",
+        "what to do when a page or a command hangs",
+        include_str!("../guide/diagnostics.md"),
+    ),
+    (
+        "chrome",
+        "drive a real Google Chrome with --engine chrome",
+        include_str!("../guide/chrome.md"),
+    ),
+    (
+        "output",
+        "--field, --jq, --full, --max-output, and where files go",
+        include_str!("../guide/output.md"),
+    ),
+    (
+        "rules",
+        "every usage rule",
+        include_str!("../guide/rules.md"),
+    ),
+];
 
-### Workflow
-
-```bash
-dalzzack start --id b --width 1920 --height 1080                # FIRST TIME ONLY: start at this size
-dalzzack list                                                   # check what's already running
-dalzzack resize --id b --width 800 --height 600                 # ALREADY RUNNING: change size at runtime
-dalzzack navigate -i b --url "https://example.com"              # open page
-dalzzack describe -i b                                          # annotated screenshot + element list
-dalzzack hover -i b --selector ".menu-trigger"                  # reveal a hover-only dropdown (macOS native :hover)
-dalzzack click -i b --selector "button.submit"                  # click by CSS selector
-dalzzack click -i b --text "Sign In"                            # click by visible text
-dalzzack fill-form -i b --selector "#email" --value "test"      # fill single field
-dalzzack wait-for -i b --selector ".result" --state added       # wait for new content
-dalzzack console-logs -i b --level error                        # check for JS errors when something misbehaves
-dalzzack back -i b                                              # history.back() with URL poll
-dalzzack scroll -i b --to bottom --selector ".container"        # scroll to bottom
-dalzzack save-image -i b --selector "img" --index -1 --output result.png  # save last image
-dalzzack screenshot -i b                                        # quick visual check
-dalzzack stop --id b                                            # graceful stop (use `kill --id b` if hung)
-```
-
-### Did the page really load? What failed? (always on — no `--record`)
-
-```bash
-dalzzack navigate -i b --url "https://site.example" --field document  # main document: status, every hop, challenge
-dalzzack nav-log -i b                                           # every document chain: 302s, 403 cf-mitigated, reloads
-dalzzack failed-requests -i b                                   # failed script/image/fetch/… WITH the URL
-dalzzack cookies -i b                                           # cookie jar incl. HttpOnly + parent domains
-dalzzack start --id c --engine chrome                           # a REAL Chrome (what Chrome sees, not WebView2)
-dalzzack reset -i c                                             # first-visit state, same id (private/chrome profiles)
-```
-
-### When something hangs
-
-If a tool times out or `navigate` never returns, the renderer is wedged. Diagnose from the outside instead of retrying:
-
-```bash
-dalzzack pause -i b                                             # WHERE is the renderer stuck right now?
-dalzzack network-log -i b --since-ms 30000                      # any requests still pending?
-dalzzack console-dump -i b --level error                        # any uncaught errors before the freeze?
-dalzzack dump-recording -i b --filter network                   # (if started with --record) full event tape, hang-resistant
-dalzzack kill --id b                                            # last resort: force-terminate the daemon
-```
-
-For investigations where you'll likely need to look at network/console events AFTER a freeze
-(e.g. "which request stalled?"), start the daemon with `--record` (or `record on` on a live one —
-events from before that moment are not on the tape). That subscribes to
-browser-process events up front and buffers them in daemon memory — `dump-recording` then reads
-the buffer directly, so it works even when every JS-/CDP-based tool would time out.
-
-```bash
-dalzzack start --id b --record                                  # arm capture BEFORE navigation
-dalzzack navigate -i b --url "https://flaky-spa.example"
-# … page freezes …
-dalzzack dump-recording -i b --output /tmp/tape.json            # daemon-memory read, hang-resistant
-```
-
-### Window Sizing — when to use `start --width` vs `resize`
-
-| Situation | Command |
-|-----------|---------|
-| First launch, want a non-default size | `start --id b --width 1920 --height 1080` |
-| Daemon already running, need different size | `resize --id b --width 800 --height 600` |
-| Want viewport size for responsive testing mid-session | `resize --id b --width 375 --height 812` |
-| Re-run `start` on an existing id | **Does NOT resize** — returns `already_running`. Use `resize`. |
-
-`start --width/--height` is **initial size only** and is ignored on subsequent `start` calls for the same id (the daemon is already up). To change a live window, always use `resize`. Run `dalzzack list` first if you're unsure whether an id is alive.
-
-### All Commands
-
-**Instance:**
-- `start [--id ID] [--width PX] [--height PX] [--record] [--watch-hang] [--auto-dump-dir DIR] [--browser-arg FLAG] [--no-console-capture] [--console-capture] [--user-agent UA] [--raw-user-agent] [--enforce-csp] [--private-profile] [--engine webview|chrome] [--chrome-path PATH]` — start browser (default 1200x800; window is resizable). If the id already has an unresponsive daemon, auto-kills and respawns.
-  - `--record` arms always-on background event capture (network/console/exceptions) so `dump-recording` works even when the renderer is wedged.
-  - `--no-console-capture` collects no console output at all — no CDP subscription, no in-page hook. Rarely needed on Windows, where capture is already invisible to the page (see `console-logs`). `console-logs` then reports `console_transport: "disabled"` instead of an empty buffer.
-  - `--console-capture` (**macOS only**) turns console capture ON, accepting that the page can see it. macOS has no invisible transport: WebKit's system-console setting makes WebKit stringify every logged argument twice, and `disable-devtool` counts those `toString` calls — two instead of one reads as "DevTools is open" and protected sites redirect away. So macOS captures nothing by default and `console-logs` reports `unavailable` with the reason. This flag installs the in-page hook instead, reported as `in_page_fallback`.
-  - `--user-agent UA` overrides the User-Agent. Unlike `--browser-arg "--user-agent=…"` this needs no private user data folder, so cookies/logins stay shared. **The engine generates its own `Sec-CH-UA` headers and you cannot override those** — a UA whose major version disagrees with the engine is a *stronger* bot signal than the default. On Windows, WebView2 already sends Edge branding at the live runtime version, so the default is left alone; passing this flag also injects a matching `navigator.userAgentData` so the three agree.
-  - `--enforce-csp` keeps the page's Content Security Policy **enforced**. dalzzack disables it by default (CDP `Page.setBypassCSP`) so cross-origin iframes can be inspected — which also means **nothing is ever blocked, so no violation can ever be reported** and `console-logs --source csp` stays empty regardless of the policy. Use this whenever the question *is* the policy; `list` reports `csp_bypassed`.
-  - `--raw-user-agent` keeps the engine's own UA even where the default is a giveaway. macOS only in practice: the WKWebView default ends at `(KHTML, like Gecko)` with no browser product token — a plain embedded-browser signature — and is completed with the installed Safari's version by default.
-  - `--watch-hang` runs a daemon-side watchdog (500 ms ping × 5 timeouts ⇒ "hang"). On hang, auto-dumps the recording buffer + a `hang.json` marker to `--auto-dump-dir` (default `<temp>/dalzzack-hangs`). Lets you walk away — post-mortem data is captured automatically.
-  - `--browser-arg FLAG` (repeatable, Windows) passes a Chromium flag to the WebView2 browser process, e.g. `--browser-arg "--enable-heap-profiling" --browser-arg "--js-flags=--stack-trace-limit=0"`. WebView2 reads these only at environment creation, so they can't be changed on a live daemon. Such an instance gets its **own WebView2 user data folder** (so it does not share cookies/logins with other ids): WebView2 permits only one set of browser arguments per folder, and a second environment with different ones fails outright.
-  - `--private-profile` gives the instance its **own browser profile** (cookies, storage, cache): empty at start, deleted by `stop`. Plain instances share ONE WebView2 profile — a login in one carries to the next, and `cookies clear` / `reset` in one would hit all of them — and every plain daemon started later — so on the shared profile those refuse with `SHARED_PROFILE` **even when no other daemon is running** (the profile outlives this one) unless `--force-shared`. `--dry-run` shows what they would delete.
-  - `--ttl 10m` (`90s`, `2h`, `1h30m`, bare seconds): the daemon stops itself through the same path as `stop` (Chrome and a private-profile folder go with it); `start`/`list` report `ttl_s`, `expires_at_ms`. For short-lived comparison instances.
-  - `--console-buffer N`: the console ring size (default 500, max 100000).
-  - `--engine chrome [--chrome-path PATH]` drives a **real Google Chrome** instead of WebView2 — see *Chrome engine* below.
-- `resize --id ID --width PX --height PX` — change size of an already-running daemon (min 100x100)
-- `list` — show running instances (pings each; cleans up stale port/pid files). Reports each daemon's `renderer_ok` (**can this daemon run JS at all?** — a webview that failed to attach makes every tool time out as if the page were wedged), `version`, `record`, `recording` (`on` | `off` | `never` — the tape state), `recording_armed` (the capture transport came up; stays true after `record off`), `watch_hang`, `console_transport`, `user_agent`/`user_agent_source` and `csp_bypassed` (**`true` means no CSP is enforced, so `console-logs --source csp` cannot report anything**) — check this FIRST when a tape or a console read is empty: a daemon started without `--record` records nothing, `console_transport: "unavailable"` means console capture never came up (empty ≠ quiet page), and `version: null` means a pre-0.9.0 binary is still running.
-  - Also `current_url` (the top document, from daemon memory — answers on a wedged renderer), `last_used` / `last_used_ms` / `last_tool` (tell an abandoned instance from one somebody is using), `started_at_ms`, `engine`, `browser_version`, `navigator_webdriver` (Chrome engine) and `profile` (`kind`: `shared` | `private` | `ephemeral`, plus its folder). Null on pre-0.18 daemons. From 0.19: `ttl_s` / `expires_at_ms` (`start --ttl`) and `console_buffer`.
-- `stop --id ID` — graceful stop via __shutdown over TCP
-- `kill --id ID` — force-kill by PID. Use when `stop` times out on a wedged daemon (bypasses TCP). On a Chrome-engine id it also ends Chrome (only if the recorded pid is still that same Chrome process — never a reused pid) and deletes its throw-away profile; on a `--private-profile` id it deletes that folder. `list` does the same for a Chrome-engine daemon whose process has died
-- `reset --id ID [--keep-browsing-data] [--keep-rules] [--force-shared] [--dry-run] [--url URL]` — back to a first-visit state **without** stopping: the id, port, window and start flags stay. Clears the profile's browsing data (cookies, cache, storage, IndexedDB, service workers — WebView2 `ClearBrowsingDataAll`; on `--engine chrome` a brand-new Chrome on a new empty profile), intercept rules, injected scripts and dalzzack's buffers (console, nav-log, failed-requests, response headers, tape contents), then opens `--url` (default about:blank). The page is left for about:blank BEFORE anything is cleared, so the old document's unload handlers cannot write back into the emptied profile. `--keep-rules` on Chrome re-registers the injected scripts in the new browser. `status: "partial"` + `failed_steps` if any step (or a nested rule clear) failed. Refuses on the shared profile (`SHARED_PROFILE`) — even with no other daemon running — unless `--force-shared` or `--keep-browsing-data`; `--dry-run` reports each step's scope, the cookies per domain it would delete and whether it would be refused, and touches nothing
-- `record on|off|status --id ID [--clear]` — switch the `--record` tape on a LIVE daemon. `on` captures from now (earlier events are not recoverable); `off` stops appending but keeps the tape readable by `dump-recording` (`--clear` drops it); `on` again resumes it, and `off_periods` lists the gaps. **Read `recording` (`on` | `off` | `never`) for the state** — `armed` only says the capture transport came up and stays `true` after `off`. Refused on a daemon whose startup capture self-test failed (a tape there would prove nothing); honours `--no-console-capture` (network events only)
-- `tools` — print JSON schemas for every tool (for MCP / LLM discovery)
-- `upgrade [--path DIR | --git URL] [--rev REV] [--keep-daemons] [--no-locked]` — self-update via `cargo install --force`. Stops running daemons first by default. Needs cargo: without it, it fails with `cargo_not_found` and a `download_url` for the prebuilt binary.
-
-**Navigate:**
-- `navigate --url URL [--timeout-ms 5000]` — also returns the page `title` and the **main document's** outcome: `document` (status, every redirect hop with its `location`/`cf-mitigated`/`server`/set-cookie names, `challenge`, whether it `committed`), `navigations_during_wait`, `later_navigations` and a `hint` — so a challenge that solves itself reads as "403 `cloudflare:challenge`, then a second navigation", not as a plain success. WebView engine: waits `--timeout-ms`; Chrome engine: returns at the top frame's `load` (`load_event_ms`), at most `--timeout-ms`
-- `back --id ID` / `forward --id ID` — `history.back/forward()` with URL poll (up to 3 s); returns `before_url`, `after_url`, `elapsed_ms`, `changed`
-- `reload --id ID [--hard]` — reload current page. `--hard` bypasses the HTTP cache (Windows: CDP `Page.reload {ignoreCache:true}`; macOS: `reloadFromOrigin`)
-- `clear-site-data --id ID [--origin URL] [--types LIST]` — wipe an origin's storage out-of-band: service worker registrations, CacheStorage, localStorage, IndexedDB, cookies. Runs outside the page's JS world, so it works when a proxy/membrane or a policy hides `navigator.serviceWorker`. `--origin` defaults to the current page. Types: `appcache,cache_storage,cookies,file_systems,indexeddb,local_storage,service_workers,shader_cache,websql` or `all`. **macOS caveat: clears by HOST, not origin — scheme and port are not distinguished.**
-- `get-url`, `get-html [--selector CSS] [--strip-noise] [--max-length N]`, `screenshot [--output PATH] [--selector CSS]` — with `--selector`, an element that is not fully visible is scrolled into view first (every engine captures only what is on screen)
-
-**Interact:**
-- `click --x X --y Y` | `click --selector CSS` | `click --text "..."` — click by coordinates, selector, or text
-- `hover --selector CSS` / `hover --x X --y Y` — move the cursor (macOS uses native CGEvent so CSS `:hover` fires; Windows/Linux dispatch JS events only and set `native_hover: false`; the Chrome engine moves Chrome's own pointer, `native_hover: true`). Use this for dropdown menus and tooltips.
-- `fill-form --selector CSS --value TEXT` — fill single field (shorthand)
-- `fill-form --fields '[{"selector":"#a","value":"1"}]'` — fill multiple fields (JSON)
-- `keyboard --text "hello"` | `keyboard --text "long" --paste` — type or paste text
-- `keyboard --key Enter [--modifiers ctrl,shift]` — press special keys
-- `scroll --to top|bottom [--selector CSS]` — absolute scroll
-- `scroll [--direction down] [--amount 500] [--selector CSS]` — relative scroll
-- `upload-file --selector "input[type=file]" --file PATH`
-- `save-image --selector CSS --output PATH [--index -1]` — save DOM image (default: last match)
-
-**Inspect:**
-- `describe [--output PATH]` — annotated screenshot with numbered elements + JSON
-- `check-visible --selector CSS` — instant visibility check
-- `element-at --x X --y Y` — find element at coordinates
-- `wait-for --selector CSS [--state present|added|removed] [--text "..."] [--timeout-ms 10000]`
-- `wait --ms MS` — sleep
-- `wait-navigation [--to SUBSTRING] [--timeout-ms 30000]` — wait until the document is REPLACED (form submit, click-through, redirect). A sentinel planted in the old document vanishes when the new one commits, so **same-URL navigations are detected too**. Trigger the click/submit first, then call this — if the navigation is already in flight and page JS no longer answers, that is treated as the event, not an error. `--to` is matched against the URL on **every** poll (and once more right before timing out), read from the browser process when the renderer is too busy for JS, so a destination that arrives late still counts. Proxied navigations can take 20–30 s — raise `--timeout-ms`. Timeout → `NAVIGATION_TIMEOUT` carrying `to`, `current_url`, `document_replaced`, `polls`/`probe_failures` so the reason is readable off the response. A completed wait also carries `document` — the newest top-frame chain from `nav-log` (status, hops, challenge).
-- `nav-log [--since-ms N] [--url-pattern STR] [--frames] [--max 20] [--headers] [--no-redact]` — the **navigation timeline**: one entry per document request chain with EVERY hop (redirects included — their response never produces `responseReceived`, so nothing else records them), each hop's `status`, `key_headers` (`location`, `cf-mitigated`, `cf-ray`, `server`, `content-type`, …), `set_cookie_names`, a detected `challenge` (`cloudflare:<value>` from `cf-mitigated`), and whether the response `committed`. Top frame by default; `--frames` adds iframe documents. `--headers` adds the request headers **as sent on the wire** (`requestWillBeSentExtraInfo`: cookies, `sec-fetch-*`; cookie values masked to `name=…[len]`) and the full response headers per hop. Always on — no `--record`; daemon-memory read. WebView2 on Windows, or `--engine chrome`
-- `failed-requests [--since-ms N] [--url-pattern STR] [--resource-type TYPE] [--no-http-errors] [--include-canceled] [--max 50] [--headers]` — every failed request of **any resource type** (document, script, image, font, fetch, …) **with its URL**, which CDP's `loadingFailed` never carries. `kind`: `blocked` (CSP / mixed content, with `blocked_reason`), `cors` (`cors_error`), `network_error` (`net::ERR_*`), `http_error` (status ≥ 400), `canceled` (hidden unless `--include-canceled` — navigating away and ad slots make plenty). Carries `initiator`/`initiator_url` and `frame_id`; `summary` counts by kind and type. Always on
-- `response-headers [--url-pattern STR] [--resource-type TYPE] [--max 50] [--no-redact]` — response headers, **including the navigation document**. WebView2 on Windows or `--engine chrome`; no `--record` needed. **Redirect hops are entries too** (`redirect: true`, sharing the request id of the chain) — before 0.18 the `302` in front of a document was silently missing.
-  - This is the only view of the document's headers. `get-requests` / `network-log` are an in-page `fetch`/XHR hook, and that hook does not exist yet when the document is fetched — the navigation is invisible to them by construction. `dump-recording` carries CDP network events but never stored headers.
-  - `--resource-type document` is usually what you want: CSP, CORP/COEP, cache policy and cookies are all decided there. Documents live in a separate ring, so a page with hundreds of subresources cannot push the navigation out of the buffer.
-  - Capture is armed at daemon start because `Network.responseReceived` fires **once**, at navigation time — there is no way to ask for it afterwards.
-  - `set-cookie` values are masked by default; the cookie name and its attributes (`Path`/`Domain`/`HttpOnly`/`SameSite`/`Secure`) are kept because those are what you debug with. `--no-redact` for the raw value.
-  - `raw_headers` appears when `Network.responseReceivedExtraInfo` arrived — headers exactly as they came off the wire, including repeated `set-cookie` lines.
-  - Every entry carries `ts_ms` (wall-clock capture time) — when the same URL was loaded several times, that is how you tell the loads apart.
-- `console-logs [--level log|info|warn|error|debug] [--source console|csp|security|network|deprecation|violation] [--frame top|INDEX|FRAME_ID] [--text SUBSTR] [--max 100] [--clear]` — read the page's captured console (log/info/warn/error/debug + uncaught errors + unhandled rejections) from the top document **and every frame, cross-site (out-of-process) ones included** — each line carries `frame_id`. Ring buffer (500 entries, `start --console-buffer N` for more), armed at daemon start; the oldest are dropped first and `dropped` counts them. `--frame` uses `exec-js --frame`'s vocabulary (`top` also keeps lines with no frame id); `matched` is the count before `--max`.
-  - **CSP violations land here too** (`--source csp`), collected from CDP `Log.entryAdded` and `Audits.issueAdded`. The page's own `securitypolicyviolation` event does not fire in this environment, so this is the only way to see a policy block — without it a blocked load is completely silent. Each entry carries `source`; untagged entries are the page's own `console.*` calls.
-  - **The page cannot tell it is being captured.** `console.log` is never wrapped: Windows subscribes to CDP `Runtime.consoleAPICalled` in the browser process, macOS turns on WebKit's own system-console logging and reads it back out of `log stream`. So `console.log.toString()` stays `[native code]`, and a getter-trapped object passed to `console.log` is never read — which is what anti-debug libraries like `disable-devtool` use to decide DevTools is open. (The old in-page hook serialized arguments with `JSON.stringify`, invoked those getters, and made every protected site redirect away.)
-  - Because it reads daemon memory it **keeps answering while the renderer is wedged**, unlike the in-page capture it replaced.
-  - Object arguments are rendered from the engine's own preview, so accessors show as `[getter]` rather than being resolved.
-  - Every response carries `console_transport`: `cdp` | `in_page_fallback` | `disabled` | `unavailable`. `unavailable` means capture never came up — an empty buffer there means nothing at all.
-  - Every response also carries `csp_bypassed` — read it in the same response before concluding anything from zero CSP violations ("nothing was blocked" on a bypassing daemon says nothing about the policy).
-  - Page `console.*` lines and uncaught errors carry `context_id` + `frame_id` (Windows). On a proxy every frame's `url` is identical, so the frame id is the only thing that says *which* of 25 frames logged a line — pair it with `get-frames`.
-- `cookies [list|clear] [--url URL | --domain D | --all] [--name N] [--no-redact] [--force-shared] [--dry-run]` — the browser's cookie jar through CDP, **HttpOnly cookies included** (invisible to `document.cookie`), and cookies on **parent domains** (`.example.com`: `_ga`, consent, cross-subdomain sessions) and third-party domains — which `clear-site-data` (one origin) leaves behind. Default scope: exactly what the browser would send to the current page; `--domain` = that domain, its subdomains and its parents; `--all` = the whole jar. Values masked unless `--no-redact`; each cookie reports `host_only`, `http_only`, `secure`, `same_site`, `expires`. `clear` deletes, then re-reads the jar and reports `remaining` (a CDP delete with a non-exact domain is otherwise a silent no-op). Refuses on the shared profile — even with no other daemon running — unless `--force-shared`; `--dry-run` lists what it would delete. Field names are snake_case (`http_only`, not CDP's `httpOnly`) — `--jq`/`--field` warn on stderr when a key is spelled the CDP way
-
-**Advanced:**
-- `exec-js --script "return document.title"` (alias: `--code`) or `exec-js --file probe.js` — prefer `--file` for anything beyond a one-liner: `--script "$(cat probe.js)"` breaks whenever the script contains quotes, backticks or `$`, `--file` never does. Results hard-capped at 5 MB. Runs in the page's **main world** (page globals ARE visible) but only in the **top frame** — a global set inside an iframe reads as `undefined` from here. Every result reports `world` / `frame` / `frame_id` / `frame_origin` / `context_id` — including the default untargeted call, so a context left over from a replaced document is visible rather than a guess.
-- `exec-js --frame <top|INDEX|origin-substring|frame-id>` — run inside a specific frame (Windows). `INDEX` is the **`get-frames` index** — same DOM enumeration on both sides, so `get-frames` index N and `--frame N` are the same frame by construction; `frame-id` (reported by `get-frames` and `known_frames`) is the stable handle. Out-of-range indexes are rejected (`FRAME_INDEX_OUT_OF_RANGE` with `dom_frame_count`); a miss returns `known_frames`. A frame with no main-world context (srcless/about:blank frames may never announce one) is an honest `NO_MAIN_WORLD_CONTEXT` — use `--world isolated` there, it only needs the frame id.
-  - **Cross-site (out-of-process) frames work too** — by index, frame id, name or URL substring, main or isolated world — through the frame's own CDP session; the result says `out_of_process: true`. A Cloudflare widget (`challenges.cloudflare.com`) is such a frame.
-  - **`RENDERER_BUSY` ≠ `FRAME_NOT_FOUND`.** `RENDERER_BUSY`: the frame exists and got the evaluate, but its renderer did not answer within `--timeout-ms` (a page computing a challenge). `FRAME_NOT_FOUND`: no such frame, decided before anything is sent. While a frame is busy, `console-logs` and `nav-log` (daemon memory) keep answering.
-- `exec-js --world isolated` — a real isolated world via `Page.createIsolatedWorld` (Windows): hidden from page hooks, and correspondingly blind to page globals. Use `main` (the default) when you need to read what the page created.
-  - **CSP and the isolated world — measured, not assumed.** The world is created with `grantUniveralAccess`, which lifts the *same-origin policy* but not the page's CSP: on a page with `connect-src 'self'`, a request to a non-allowlisted origin is blocked in `--world isolated` exactly as in `--world main`, and each produces its own violation. So an isolated world is not a CSP bypass.
-  - **What actually removes the wall is dalzzack itself.** By default the daemon calls `Page.setBypassCSP`, which disables enforcement for *every* world — so nothing is ever blocked, no violation is ever reported, and a load that a real browser would refuse succeeds here. If you are testing a policy, `start --enforce-csp` first; `list` reports `csp_bypassed`. To read the policy rather than test it, use `response-headers --resource-type document`.
-- `exec-js --await --script "const r = await fetch('/x'); return r.status"` — resolve a promise instead of failing on it, so the script can use top-level `await` (Windows: CDP `Runtime.evaluate {awaitPromise:true}`; macOS: `callAsyncJavaScript`). Without `--await`, returning a promise fails with "Promise result not supported in sync mode".
-- `exec-js --target sw [--script …]` — evaluate inside the page's **service worker** (its own isolate: `self`, `caches`, `clients`, the worker's globals — nothing page-side can reach them). `--target sw:<substring>` picks the worker whose script URL contains it; plain `sw` the most recently attached. `--await` works; `--frame`/`--world` don't apply. Results carry `target: "service_worker"`, `session_id`, `script_url`. `NO_SERVICE_WORKER` lists what is attached. WebView2 on Windows or `--engine chrome`
-- `get-requests [--url-pattern STR] [--seconds 60] [--max-count N] [--include-headers] [--no-redact]` — captured XHR/fetch. **In-page hook**: script/CSS/image loads are invisible to it and it cannot say who initiated a request. For either, use `failed-requests` / `nav-log` (always on) or `dump-recording` — its CDP network events cover every request type and carry `initiator` (with a JS call stack for script-triggered loads). `--include-headers` adds each request's headers + timestamp (Authorization/Cookie redacted to a 12-char prefix; `--no-redact` for full values). On `--engine chrome` it is served from CDP instead (`source: "cdp"`, nothing injected; `bodyPreview` via `Network.getResponseBody`).
-- `get-frames [--full]`, `get-frame-html [--selector CSS | --index N]` — iframe listing / HTML. Each frame carries its CDP `frame_id` (Windows) — the handle `exec-js --frame` accepts — and the listing index doubles as `--frame`'s index space. A cross-site frame is marked `out_of_process: true` with its current `url` (read from its own target — the parent cannot see a cross-site frame's location). `name` is truncated to 200 chars by default (`name_len`/`name_truncated` mark the cut — SafeFrame ad slots put multi-KB JSON there); `--full` returns complete values.
-- `dismiss-modals [--max-attempts 3]` — close modals/popups (Vue/Element/Bootstrap)
-- `captcha --input-file PATH [--output-file PATH]` — captcha image preprocessing
-
-**Fault injection (client-side network interception):** break the network on purpose to reproduce race/timeout bugs — no server access needed. Rules are applied via document-start injection, so they beat the app bundle's own `fetch` capture, persist across navigations, and die with the daemon.
-- `intercept --pattern "*/portfolio*" --action hang [--ms N]` — matching requests never resolve (black hole). Honors the app's own AbortController/timeout; `--ms` optionally auto-errors after N ms. Pending requests show up in `get-requests` with `intercepted:"hang"`.
-- `intercept --pattern "*/markets*" --action delay --ms 8000` — hold matching requests N ms, then pass through normally.
-- `intercept --pattern "*/orders" --action fail` — immediate TypeError('Failed to fetch') network error.
-- `intercept --pattern "*/quote*" --action mock [--status 500] [--body '{"err":1}'] [--content-type application/json] [--ms N]` — respond locally without touching the network.
-- `--method POST` on any rule restricts it to one HTTP method. Pattern without `*` = substring match; with `*` = glob over the full URL. First matching rule wins; re-adding the same pattern replaces it.
-- `intercept-list` — active rules + the rule-set version the live page has applied.
-- `intercept-clear [--pattern STR]` — remove all rules, or just one pattern.
-- On `--engine chrome` the same rules are enforced by Chrome itself through CDP's `Fetch` domain (`sync.transport: "cdp_fetch"`) — nothing is injected, `fetch.toString()` stays native. Same scope: fetch and XHR, in every frame (cross-site frames are held at start until their rules are in place); a `mock` also answers the request's CORS preflight locally and echoes the request's `Origin` with credentials allowed, so credentialed cross-origin mocks work.
-
-**Document-start injection:** run your own script *before any page script*, on every navigation. This is the only way to observe what happens before the page's own code runs — `exec-js` needs a loaded document, so by the time it arrives the first API call and the first DOM insertion are already history.
-- `inject-script --name LABEL (--script JS | --file PATH) [--world isolated|main]` — register it. Takes effect from the **next** navigation.
-- **The world is the important choice.** `isolated` (default) shares the DOM but **cannot see page globals** — it cannot wrap `window.fetch` or anything the page created, so a script written for that will run happily and observe nothing. Use `--world main` to pre-empt a page API. Measured: a `main`-world `Object.defineProperty` hook catches the page's *first* assignment; from `isolated` the same global reads `undefined` while the DOM is visible.
-- The isolated world is the same one `exec-js --world isolated` uses, so values the injected script leaves behind are readable from there. Verified at document start: `readyState: "loading"`, `document.scripts.length: 0`, `document.body === null`.
-- `inject-list` — what is registered, and the world each runs in.
-- `inject-clear [--name LABEL]` — unregister one or all. **macOS cannot remove an individual `WKUserScript`**, so there the response says the script keeps running until the daemon restarts rather than implying a clean page.
-- Scripts live in daemon memory and die with it. Windows uses CDP `Page.addScriptToEvaluateOnNewDocument`; macOS uses `WKUserScript` in a named `WKContentWorld`.
-- Typical request-queue check: 4× `intercept --action hang` on distinct endpoints → drive the UI → `get-requests --include-headers` shows the 4 pending slots while the 5th request still completes; the app's 25s abort surfaces as `error:"aborted"`.
-- Typical account-switch check: `intercept --action delay --ms 8000` to back up the queue → switch accounts → `get-requests --include-headers` and compare the Authorization prefix of requests fired after the switch.
-
-**Diagnostics (hung / slow renderer):** when `exec-js` or other tools time out, the renderer is wedged. These look at it from the OUTSIDE.
-- `pause --id ID [--duration-ms 1200]` — WHERE is it frozen. macOS: external `sample` of the WebContent process (works on a fully hung renderer). Windows: CDP JS stack PLUS a `MiniDumpWriteDump`-based minidump of every renderer process — driven by Windows kernel debug APIs, so it works on a fully wedged renderer (the kernel takes the dump, not V8). Open `.dmp` in WinDbg/Visual Studio. **Start here for any freeze.**
-- `pause --id ID --symbolize [--download-symbols] [--symbol-cache DIR] [--all-threads]` — Windows: resolve native stacks to function names (dbghelp) instead of handing back a `.dmp` path. **Threads blocked in a syscall are excluded** and counted as `waiting_threads` — leaving them in puts "the process was idle" at the top of every histogram. Classification is by *symbol*, so a thread inside `NtAllocateVirtualMemory` counts as WORK (an allocation storm is exactly what you're usually hunting) while `NtWaitForSingleObject` counts as a wait. Module paths come from the dump itself, so a WebView2 auto-update can't break symbol loading. Without `--download-symbols` only exported symbols resolve and the rest falls back to `module+0xRVA` rather than vanishing.
-- **`--download-symbols` needs `dbghelp.dll` + `symsrv.dll` next to `dalzzack.exe`.** The System32 dbghelp has no symbol-server support, and the loader binds it by base name at process start, so nothing can redirect it later. If those DLLs are missing, dalzzack copies them from the Windows Kits Debuggers folder and tells you to re-run. Check `dbghelp` (`external` = good, `system` = downloads impossible), `symsrv_loaded`, and `dbghelp_log` (dbghelp's own account of where it searched) in the response. First fetch of `msedge.dll.pdb` is ~630 MB.
-- `pause --id ID --samples N [--interval-ms M]` — take N dumps of **one** process instead of one dump of every process. With `--symbolize` the response carries a frame histogram — the only way to tell "spinning here" from "happened to be here". The target picks itself: the first sample dumps everything, then sampling follows whichever process actually has busy threads (`sampled_pid` + `sample_target_reason` say which and why). `suggested_pid` is now reported in every mode, not just full-memory.
-- `pause --id ID --full-memory [--only-pid PID] [--all-processes] [--max-bytes N]` — Windows: dump the **heap too** (`MiniDumpWithFullMemory` + full-memory-info + handle data), so page/JS strings and allocations are searchable in the `.dmp`. This is the answer to *"what is being allocated?"* — the default dump is stacks-only and contains no page strings at all. Size ≈ the target's working set, so without `--only-pid` only the **largest** WebView2 process is dumped (`--all-processes` overrides; that's GBs). Every run reports `candidate_processes` (pid + working set) — pick your `--only-pid` from there. `--max-bytes` warns, never fails.
-- `profile-start --id ID` … reproduce the issue … `profile-stop --id ID [--output cpu.json]` — CPU sampling (busy-loop vs idle-wait).
-- `heap-snapshot --id ID [--output PATH]` — memory report (macOS native memory; Windows JS heap usage).
-- `console-dump --id ID [--level LVL] [--max N]` — same buffer as `console-logs`, plus a `source` field naming the transport that answered and explicit hung-renderer flagging. On `cdp` / `os_log` it is a daemon-memory read and works straight through a hang.
-- `sw-console --id ID [--level LVL] [--max N] [--clear]` — the **Service Worker's own** console + uncaught exceptions (incl. a SW `fetch()` failing on CSP). A SW runs in its own isolate, so nothing it logs reaches `console-logs`/`console-dump`. WebView2 on Windows, or `--engine chrome` (where workers are held at start, so their boot logs are captured). Two transports, armed together: `Target.setAutoAttach` (full `console.*` + exceptions, but a SW target belongs to the *browser*, not this page session, so attach often isn't possible) and the `ServiceWorker` domain (`workerErrorReported` — errors only, reachable from the page session). A per-session `Runtime.enable` timeout is now degradation, not failure: worker errors already captured are still returned (`diagnostics.session_runtime_enable_error` flags it). `SW_ATTACH_UNAVAILABLE` fires only when NO transport is live and nothing was captured, and its `diagnostics` names the cause — no worker (`worker_versions_seen: 0`), attach refused (raw CDP error), or a runtime without `ICoreWebView2_11` (`session_cdp_available: false`).
-- `network-log --id ID [--since-ms N] [--url-pattern STR] [--max N]` — fetch/XHR, flags requests still pending (a common hang trigger).
-- `attach-devtools --id ID` — macOS: enable Safari Web Inspector; Windows: open the WebView2 DevTools window.
-- `exec-js-isolated --id ID --script "..." [--timeout-ms 30000]` — run JS in a world isolated from page globals. Note it evaluates in the page's *default* context, not a real isolated world — `exec-js --world isolated` is the real thing.
-- `wait-for-condition --id ID --script "return COND" [--timeout-ms 30000] [--interval-ms 250]` — poll a JS condition (detects wedged renderer instead of blocking forever).
-- `dump-recording --id ID [--output PATH] [--filter all|network|console|exceptions] [--since-ms N] [--clear]` — snapshot the always-on recording buffer. **Pure daemon-memory read, no IPC into the page** — answers even when every other diagnostics tool would time out. Requires `start --record` or `record on` (a tape stopped by `record off` stays readable and says so in `note`). Reports `renderer_wedged_at_ms` so you can see exactly when capture stopped, and `armed`/`arm_error`/`arm_verified`: an empty tape now tells you whether the page was quiet or the capture transport never came up (it returns `RECORDING_NOT_ARMED` instead of a plausible-looking zero). `arm_verified` is a startup self-test — the daemon logs one console line on its own landing page, confirms it arrives, and removes it from the tape — so "events are flowing" is proven rather than assumed. `dalzzack_version` is included; if it's older than you expect, the daemon is a stale binary.
-- `trace --id ID [--duration-ms 2000] [--output PATH] [--categories STR]` — capture a chrome-tracing-compatible timeline. Windows: real CDP `Tracing.*` over the browser process (hang-resistant, includes V8/blink internals). macOS: Performance API + paint/longtask via injection (degraded). Output opens in chrome://tracing or perfetto.
-- `debugger-arm --id ID [--strategy first-script|exceptions|url] [--url-pattern REGEX]` / `debugger-snapshot --id ID [--clear]` / `debugger-disarm --id ID` — Windows-only: pre-arm V8 so `Debugger.paused` events fire, daemon buffers call frames and auto-resumes. Use when "what JS is running at startup?" matters.
-- `debugger-snapshot` resolves each frame's `scriptId` to a URL by joining against buffered `Debugger.scriptParsed` — call frames carry a scriptId and an *empty* `url` for eval'd, bundled and inline scripts, which is exactly the code worth identifying. Each frame gets `url`, `url_source` (`call_frame` | `script_parsed` | `unknown`), `pageLineNumber` (inline scripts offset by the script's `startLine`) and `script_origin_stack` (who called `eval`). The `scripts[]` table lists the referenced scripts; `scripts_unresolved` counts ids we never saw parsed.
-- `debugger-arm --strategy exceptions [--uncaught-only] [--max-frames N] [--sample-every N]` — pause on **every throw** (`Debugger.setPauseOnExceptions`). This is the only way to see engine-thrown errors: Proxy-invariant `TypeError`s, `Illegal invocation`, and friends never pass through the page's global `Error`/`TypeError` constructors, so wrapping those in-page always reports zero. Every throw pausing V8 is slow by construction — on a storm use `--sample-every N` (record every Nth) and `--max-frames N`. `debugger-snapshot` reports `seen_total` vs `dropped_by_sampling` so the sampled count is never mistaken for the real one, and it reads daemon memory, so it answers on a wedged renderer.
-
-**Batch:** `run --steps workflow.json`
-
-### Chrome engine (`start --engine chrome`)
-
-WebView2 is Chromium but not Chrome, and the differences are what bot defences measure: the TLS ClientHello (measured: Chrome 154 sends 19 extensions, WebView2 18 — the missing one is `trust_anchors` 0xCA34, i.e. a different JA4), client hints, brand list. `--engine chrome` launches the installed Google Chrome on a **fresh throw-away profile** with only `--user-data-dir --remote-debugging-port=<free port> --no-first-run --no-default-browser-check` — no `--enable-automation`, no headless — and serves the same commands over CDP.
-- `start` and `list` report `browser_version` and **`navigator_webdriver`** (measured at startup; must be `false`). Measured: `--remote-debugging-port=0` alone flips it to `true`, which is why dalzzack picks the port itself.
-- Same tools, same output shapes. JS-based tools run through `Runtime.evaluate`; `click`/`hover`/`keyboard` use `Input.dispatch*Event`, so events are **trusted** (`isTrusted: true`, `trusted: true` in the result) and CSS `:hover` fires; `navigate` returns at `load`; `screenshot` uses `Page.captureScreenshot`.
-- Frames: `get-frames` follows the top document's `<iframe>` order (same index space as WebView); cross-site iframes run out of process and are reached through their own session (`out_of_process: true`) — `exec-js --frame N` and `get-frame-html` work in them.
-- CSP is **enforced** (`csp_bypassed: false`) — it is Chrome. `--user-agent` / `--enforce-csp` / `--private-profile` don't apply; `--browser-arg` passes Chrome flags; `--no-console-capture` skips `Runtime.enable` (frame main worlds then need `--world isolated`).
-- `stop` closes Chrome and deletes the profile before it answers (its output carries `chrome.profile_removed`), so `stop && start` is safe; `kill` reaps both; closing the Chrome window (or Chrome dying) stops the daemon. `reset` starts a new Chrome on a new profile under the same id.
-- Not available (WebView2 internals): `pause`, `profile-*`, `heap-snapshot`, `trace`, `debugger-*`, `exec-js-isolated` → `UNSUPPORTED_ON_ENGINE`. Use F12 in the Chrome window instead.
-- **No prerendering** — the one measured difference from a user's Chrome: speculation-rules prerenders are refused while DevTools is attached (`PrerenderingDisabledByDevTools`); prefetch still happens. Don't read a page's missing prerender activation as the site's doing.
-
-### Output filtering (every command that prints one JSON document)
-- `--field PATH` (repeatable) — print one value: `--field status`, `--field document.hops[0].status`, `--field "instances[].id"` (`[]` fans out). Several → an object keyed by path. Missing → `null`. **A `status: "failed"` result is printed whole with exit code 1** — a filter never turns an error into a plausible `null`.
-- `--jq EXPR` — real jq, built in (no `jq` binary needed): `--jq '.navigations[] | {status, final_url}'`. One output per line; sees failures too.
-- `--raw` — strings without quotes (like `jq -r`); a fanned-out string list prints one per line.
-
-### Rules
-- `-i` may be omitted when exactly one instance is running — it is used automatically (noted on stderr). Zero or several instances, and every usage error, fail with one JSON line on **stdout**, so a runner with `2>/dev/null` can no longer turn a mistyped command into a silent no-op
-- After a click/submit that replaces the document, use `wait-navigation` (not a sleep, not URL polling — it catches same-URL navigations). If the page had already landed before the call, it answers `already_at_target: true` within ~1.5 s instead of waiting out the timeout; to wait for a same-URL *re*-navigation, start it before the trigger
-- **Git-Bash (MSYS2) rewrites any argument starting with `/` into a Windows path** — `--to "/zp/p/"` reaches the tool as `C:/Program Files/Git/zp/p/` and matches nothing. Prefix such commands with `MSYS_NO_PATHCONV=1` (or make the value not start with `/`). Affects `--to`, `--url-pattern`, `--pattern`; the response carries `hint_shell_pathconv` when a value has that shape
-- Use `describe` first to discover elements, `screenshot` for quick checks
-- Prefer `click --selector` or `--text` over coordinate clicks
-- Use `hover` (not coordinate-only mouseover) to open dropdown menus on macOS; CSS `:hover` won't trigger from JS events alone
-- Use `fill-form --selector --value` for single fields (no JSON needed)
-- Use `wait-for --state added` instead of `sleep` to wait for new content
-- Use `save-image --index -1` to grab the last matching image
-- Use `scroll --to bottom` for SPA containers with dynamic content
-- Use `back` / `forward` / `reload` for history navigation rather than re-navigating to a previous URL
-- Use `console-logs` when JS-driven UI misbehaves — the page's own errors are usually the fastest debug signal. It no longer needs a live renderer, so reach for it during a hang too
-- **To see what happened before the page's own code ran, `inject-script` is the only option** — `exec-js` always arrives too late. Pick `--world main` if you need to wrap or watch a page API; `isolated` cannot see page globals and will silently observe nothing
-- **A tool that answers `status: "failed"` is telling you about itself, not the page.** Decode and parse failures used to be reported as empty results — `get-frames` said "No iframes on the page" for pages full of them. If you get a `JS_RESULT_*` error, the payload is in the message
-- **When something is blocked and you don't know why, read the headers before theorising.** `response-headers --resource-type document` shows the CSP/CORP/cache policy the document was actually served with, and `console-logs --source csp` shows what that policy blocked. Both are on by default
-- **Before concluding anything about a CSP, check `csp_bypassed` in `list`.** dalzzack disables CSP enforcement by default so cross-origin iframes can be inspected — which means nothing is ever blocked and `--source csp` sits at zero regardless of the policy. Restart with `start --enforce-csp` to make the browser a witness. Changing worlds does **not** work around this: the isolated world is subject to the same CSP as the main world (measured), so a load succeeding there is not evidence the policy allows it
-- **Distinguish a CSP block from a CORS block.** They both surface as `Failed to fetch`. `console-logs --source csp` shows only the former; a CORS failure appears with `source: "javascript"` and says so
-- **If a site redirects you away the moment it loads** (often to `google.com`), something dalzzack does is tripping `disable-devtool`. Check `list` for `console_transport`: `in_page_fallback` means the page-visible hook is installed — restart WITHOUT `--console-capture` (macOS) or with `--no-console-capture` (Windows). On macOS the default is already no capture, so a redirect there is not the console hook
-- Don't reach for `--user-agent` to look "more like a browser". The engine's `Sec-CH-UA` headers cannot be overridden, so a mismatched UA scores *worse* than the default. Windows already sends a consistent Edge UA
-- To reset ONE origin to a first-visit state, run `clear-site-data` then `reload --hard`; for everything (parent-domain and third-party cookies included) use `reset` — on a `--private-profile` or `--engine chrome` instance, since plain instances share one profile. Don't try to unregister a service worker from page JS — a proxy/membrane can hide `navigator.serviceWorker.controller` and a policy can block `getRegistrations()`, so it silently no-ops
-- **"Did the site let us through?" is a question for `nav-log`, not the final URL.** A challenge that solves itself (`403` + `cf-mitigated: challenge`, then a script reload) ends on the right page and used to read as a plain success; `navigate`'s `document`/`challenge`/`later_navigations` and `nav-log` show both hops
-- **"WebView2 gets challenged" is not evidence about the site.** WebView2's TLS ClientHello and client hints differ from Chrome's; answer "what does Chrome get?" with `start --engine chrome`, and check `navigator_webdriver: false` in its `start` output
-- A script, image or iframe that silently failed to load: `failed-requests` (URL + `kind` + `error_text`), not `get-requests` (fetch/XHR only)
-- When `cookies clear` or `reset` answers `SHARED_PROFILE`, this daemon is on the shared cookie jar — other sessions' daemons use it now or later, so "no other daemon is up" is not "nobody uses it". Restart with `--private-profile` rather than reaching for `--force-shared`, or `--dry-run` to see what is at stake
-- A `--jq`/`--field` key that does not exist reads as `null`. If stderr says `no key "httpOnly" … did you mean "http_only"?`, the output is snake_case and the key was spelled the CDP way
-- If the SW itself is the suspect (a panic or trace inside it), read `sw-console` — those logs never appear in `console-logs`
-- Reach for `exec-js --await` instead of stashing a promise on `window.__x` and polling it with a second `exec-js` call
-- When a tool times out (especially `exec-js` / `navigate`), run `pause` first to confirm the renderer is wedged; don't keep retrying the same call
-- For sessions where post-mortem matters (which request stalled? which JS errored before the freeze?), launch with `start --record` so `dump-recording` has a hang-resistant tape to read
-- **A tool timing out is not proof the page is wedged.** Check `list` → `renderer_ok` first: if it's false the webview itself never came up, and every timeout from that daemon is the tool's, not the page's
-- `exec-js` sees page globals (main world) but only in the **top frame** — if something reads as `undefined`, try `--frame` before concluding your instrumentation failed. Count frames with `get-frames` and target with the same index or, better, the `frame_id` it reports — the two tools share one coordinate system
-- A targeted exec-js failing as `CONTEXT_NOT_FOUND` means the frame's document was replaced since the context was recorded (iframe reload, ad-slot recycle) — re-run `get-frames` and target again; the payload carries `known_frames`
-- On a wedge, prefer `pause --symbolize --samples 6` over a single `pause`: one sample can't distinguish spinning from passing through. For msedge-internal names (V8 GC/alloc), you need `--download-symbols`, which needs `dbghelp.dll`+`symsrv.dll` beside the exe — dalzzack installs them on first use and asks you to re-run once
-- When `pause` tells you *where* the stack is but not *why* (GC / exception machinery in the RIP histogram), re-run it with `--full-memory --only-pid <the fat renderer>` — the stacks-only dump has no heap, so it cannot answer "what is allocated"
-- Don't try to count engine-thrown exceptions by wrapping `window.Error`/`TypeError` — those never go through the JS constructors and you'll measure zero. Use `debugger-arm --strategy exceptions`
-- Use `kill` only when `stop` fails — graceful shutdown gives the daemon a chance to clean up
-- **`start` flags only apply to a NEW daemon.** Re-running `start --record` against a live id returns `already_running` and lists what it ignored in `ignored_flags` — the daemon keeps the flags it was born with. `stop` then `start` to change them
-- If `dump-recording` looks empty, read `list` first: `record: false` means it was never recording (`record on` turns it on now — earlier events are gone), and an old `version` means `dalzzack upgrade` hasn't reached that daemon
-- **Never re-run `start` to change window size** — it's a no-op if the id is alive and responsive. Use `resize` for live windows; `list` to check what's alive.
-- `--width/--height` on `start` only set the *initial* size; they don't override an existing daemon's window.
-<!-- dalzzack-end -->
-"##;
+/// `guide`: one topic, all of them, or the list of topics.
+fn print_guide(topic: Option<&str>, all: bool) {
+    if all {
+        for (_, _, text) in GUIDE_TOPICS {
+            println!("{text}");
+        }
+        return;
+    }
+    let Some(topic) = topic else {
+        println!("dalzzack guide <topic>\n");
+        for (name, about, _) in GUIDE_TOPICS {
+            println!("  {name:<12} {about}");
+        }
+        return;
+    };
+    match GUIDE_TOPICS.iter().find(|(name, _, _)| *name == topic) {
+        Some((_, _, text)) => print!("{text}"),
+        None => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "failed",
+                    "error": "UNKNOWN_TOPIC",
+                    "message": format!("No topic is named {topic}. `dalzzack guide` lists them."),
+                })
+            );
+            std::process::exit(2);
+        }
+    }
+}
 
 const BLOCK_BEGIN: &str = "<!-- dalzzack-begin -->";
 const BLOCK_END: &str = "<!-- dalzzack-end -->";
@@ -3110,6 +2958,31 @@ mod tests {
             tools_output(&defs, None, false).as_array().unwrap().len(),
             defs.len()
         );
+    }
+
+    #[test]
+    fn the_installed_guide_stays_small() {
+        // Every session of every agent pays for these bytes, also a session
+        // that never opens a browser. The rest belongs in a topic.
+        let size = DALZZACK_DOCS.len();
+        assert!(size <= 4096, "the installed guide is {size} bytes");
+    }
+
+    #[test]
+    fn agents_md_is_the_installed_guide() {
+        assert_eq!(
+            include_str!("../../AGENTS.md").replace("\r\n", "\n"),
+            DALZZACK_DOCS.replace("\r\n", "\n"),
+            "run `dalzzack install codex-project` in the repo root"
+        );
+    }
+
+    #[test]
+    fn the_installed_guide_names_every_topic() {
+        for (name, about, text) in GUIDE_TOPICS {
+            assert!(DALZZACK_DOCS.contains(name), "{name}");
+            assert!(!about.is_empty() && !text.trim().is_empty(), "{name}");
+        }
     }
 
     #[test]
