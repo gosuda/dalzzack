@@ -88,13 +88,14 @@ fn describe(result: &Value) -> Value {
     let rows: Vec<String> = elements
         .iter()
         .map(|e| {
+            let words: Vec<&str> = text_of(e, "text").split_whitespace().collect();
             let row = format!(
                 "{} {} {},{} {}",
                 e["id"],
                 text_of(e, "tag"),
                 e["x"],
                 e["y"],
-                text_of(e, "text")
+                words.join(" ")
             );
             row.trim_end().to_string()
         })
@@ -206,10 +207,11 @@ fn console_logs(args: &Value, result: &Value) -> Value {
 /// The script's value. Where it ran matters only when the caller chose the place.
 fn execute_js(args: &Value, result: &Value) -> Value {
     let mut out = result.clone();
-    let targeted = ["frame", "world", "target"]
-        .iter()
-        .any(|key| !args[*key].is_null());
-    if let (false, Some(fields)) = (targeted, out.as_object_mut()) {
+    // `world` and `target` always arrive, with these default values.
+    let chosen = !args["frame"].is_null()
+        || !matches!(args["world"].as_str(), None | Some("main"))
+        || !matches!(args["target"].as_str(), None | Some("page"));
+    if let (false, Some(fields)) = (chosen, out.as_object_mut()) {
         for key in ["context_id", "frame", "frame_id", "frame_origin", "world"] {
             fields.remove(key);
         }
@@ -335,13 +337,18 @@ mod tests {
             "elements": [
                 { "id": 0, "tag": "input", "text": "alice", "x": 93, "y": 143 },
                 { "id": 1, "tag": "button", "text": "", "x": 262, "y": 143 },
+                { "id": 2, "tag": "a", "text": "two\n  lines", "x": 1, "y": 2 },
             ],
             "formValues": { "user": "alice", "hidden_elsewhere": "other" },
         });
         let short = brief("describe", &json!({}), &full);
         assert_eq!(
             short["elements"],
-            json!(["0 input 93,143 alice", "1 button 262,143"])
+            json!([
+                "0 input 93,143 alice",
+                "1 button 262,143",
+                "2 a 1,2 two lines"
+            ])
         );
         assert_eq!(short["formValues"], json!({ "hidden_elsewhere": "other" }));
         assert_eq!(short["total"], 40);
@@ -416,12 +423,18 @@ mod tests {
             "frame_origin": "https://example.com",
             "world": "main",
         });
+        let defaults = json!({ "frame": null, "world": "main", "target": "page" });
         assert_eq!(
-            brief("execute_js", &json!({ "frame": null }), &full),
+            brief("execute_js", &defaults, &full),
             json!({ "status": "completed", "result": null })
         );
-        let framed = brief("execute_js", &json!({ "frame": "1" }), &full);
-        assert_eq!(framed["frame_id"], "F");
+        for chosen in [
+            json!({ "frame": "1", "world": "main", "target": "page" }),
+            json!({ "frame": null, "world": "isolated", "target": "page" }),
+            json!({ "frame": null, "world": "main", "target": "sw" }),
+        ] {
+            assert_eq!(brief("execute_js", &chosen, &full)["frame_id"], "F");
+        }
     }
 
     #[test]
