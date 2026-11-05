@@ -588,8 +588,11 @@ enum Cli {
         /// CSS selector (default: full page)
         #[arg(long)]
         selector: Option<String>,
-        /// Strip script/style/svg/comment noise (default: true)
-        #[arg(long, default_value = "true")]
+        /// Keep script/style/svg/comment noise. Stripping is the default.
+        #[arg(long)]
+        no_strip_noise: bool,
+        /// Stripping is the default, so this flag changes nothing.
+        #[arg(long, hide = true, conflicts_with = "no_strip_noise")]
         strip_noise: bool,
         /// Max output length in chars
         #[arg(long)]
@@ -1813,6 +1816,7 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
         Cli::GetHtml {
             id,
             selector,
+            no_strip_noise,
             strip_noise,
             max_length,
         } => (
@@ -1820,7 +1824,7 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
             "get_html".into(),
             serde_json::json!({
                 "selector": selector,
-                "strip_noise": strip_noise,
+                "strip_noise": strip_noise || !no_strip_noise,
                 "max_length": max_length,
             }),
         ),

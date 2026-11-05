@@ -29,114 +29,149 @@ pub struct ToolDefinition {
 // HTML Noise Stripping Helpers
 // ============================================================================
 
-/// Strip `<script>`, `<style>`, `<noscript>`, `<svg>`, and comment blocks from HTML.
-fn strip_html_noise(html: &str) -> String {
-    // Phase 1: remove tag blocks (script, style, noscript, svg, comments)
-    let mut result = String::with_capacity(html.len());
-    let bytes = html.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
+/// Elements whose whole content is noise.
+const NOISE_BLOCKS: [&[u8]; 4] = [b"script", b"style", b"noscript", b"svg"];
 
-    while i < len {
-        if bytes[i] == b'<' && i + 3 < len {
-            let rest = &html[i..];
-            let rest_lower = rest.to_ascii_lowercase();
-
-            // Remove <!-- ... --> comments
-            if rest.starts_with("<!--") {
-                if let Some(end) = rest.find("-->") {
-                    i += end + 3;
-                    continue;
-                }
-            }
-            // Remove <script...>...</script>
-            if rest_lower.starts_with("<script")
-                && (rest.len() > 7
-                    && (bytes[i + 7] == b' ' || bytes[i + 7] == b'>' || bytes[i + 7] == b'\n'))
-            {
-                if let Some(end) = rest_lower.find("</script>") {
-                    i += end + 9;
-                    continue;
-                }
-            }
-            // Remove <style...>...</style> (not the style= attribute)
-            if rest_lower.starts_with("<style")
-                && (rest.len() > 6
-                    && (bytes[i + 6] == b' ' || bytes[i + 6] == b'>' || bytes[i + 6] == b'\n'))
-            {
-                if let Some(end) = rest_lower.find("</style>") {
-                    i += end + 8;
-                    continue;
-                }
-            }
-            // Remove <noscript...>...</noscript>
-            if rest_lower.starts_with("<noscript") {
-                if let Some(end) = rest_lower.find("</noscript>") {
-                    i += end + 11;
-                    continue;
-                }
-            }
-            // Remove <svg...>...</svg>
-            if rest_lower.starts_with("<svg")
-                && (rest.len() > 4
-                    && (bytes[i + 4] == b' ' || bytes[i + 4] == b'>' || bytes[i + 4] == b'\n'))
-            {
-                if let Some(end) = rest_lower.find("</svg>") {
-                    i += end + 6;
-                    continue;
-                }
-            }
-        }
-        result.push(html.as_bytes()[i] as char);
-        i += 1;
-    }
-
-    // Phase 2: remove style="..." and the data-* attributes that add nothing
-    strip_attributes(&result, &[" style=\"", " data-v-", " data-reactid=\""])
+fn is_html_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
 }
 
-/// Strip HTML attributes whose key starts with any of the given prefixes.
-fn strip_attributes(html: &str, prefixes: &[&str]) -> String {
-    let mut result = html.to_string();
-    for prefix in prefixes {
-        while let Some(start) = result.find(prefix) {
-            let attr_start = start; // includes the leading space
-            let after_prefix = &result[start + prefix.len()..];
+fn ends_tag_name(b: u8) -> bool {
+    is_html_space(b) || matches!(b, b'>' | b'/')
+}
 
-            // An attribute with no value, such as data-v-: it runs to the next space or >
-            if prefix.contains("data-v-") {
-                if let Some(end_pos) = after_prefix.find([' ', '>', '/']) {
-                    let remove_end = start + prefix.len() + end_pos;
-                    result = format!("{}{}", &result[..attr_start], &result[remove_end..]);
-                    continue;
-                }
-                break;
-            }
+/// Remove comments, `<script>`, `<style>`, `<noscript>`, `<svg>`, and the
+/// attributes that only describe presentation or framework bookkeeping.
+///
+/// Every cut falls on an ASCII byte, so the text between cuts stays valid UTF-8
+/// and is copied unchanged.
+fn strip_html_noise(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while let Some(offset) = html[i..].find('<') {
+        let tag = i + offset;
+        out.push_str(&html[i..tag]);
+        i = match noise_block_end(html.as_bytes(), tag) {
+            Some(end) => end,
+            None => copy_tag(html, tag, &mut out),
+        };
+    }
+    out.push_str(&html[i..]);
+    out
+}
 
-            // Find a quoted value ("..." or '...')
-            let first_char = after_prefix.chars().next();
-            match first_char {
-                Some(q @ ('"' | '\'')) => {
-                    if let Some(end) = after_prefix[1..].find(q) {
-                        let remove_end = start + prefix.len() + 1 + end + 1;
-                        result = format!("{}{}", &result[..attr_start], &result[remove_end..]);
-                        continue;
-                    }
-                    break;
-                }
-                _ => {
-                    // Unquoted value: it runs to the next space or >
-                    if let Some(end_pos) = after_prefix.find([' ', '>', '/']) {
-                        let remove_end = start + prefix.len() + end_pos;
-                        result = format!("{}{}", &result[..attr_start], &result[remove_end..]);
-                        continue;
-                    }
-                    break;
-                }
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Where the comment or noise element that opens at `at` ends. `None` for any
+/// other tag, and for a block that never closes: that text is kept.
+fn noise_block_end(bytes: &[u8], at: usize) -> Option<usize> {
+    let rest = &bytes[at..];
+    if rest.starts_with(b"<!--") {
+        return find_bytes(rest, b"-->").map(|end| at + end + 3);
+    }
+    let name = NOISE_BLOCKS.iter().find(|name| {
+        rest.len() > name.len() + 1
+            && rest[1..=name.len()].eq_ignore_ascii_case(name)
+            && ends_tag_name(rest[name.len() + 1])
+    })?;
+    closing_tag_end(rest, name).map(|end| at + end)
+}
+
+/// Where the first `</name>` ends, in any letter case.
+fn closing_tag_end(bytes: &[u8], name: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while let Some(offset) = find_bytes(&bytes[i..], b"</") {
+        let start = i + offset + 2;
+        let after = start + name.len();
+        if bytes.len() > after && bytes[start..after].eq_ignore_ascii_case(name) {
+            let close = after + bytes[after..].iter().position(|b| !is_html_space(*b))?;
+            if bytes[close] == b'>' {
+                return Some(close + 1);
             }
         }
+        i = start;
     }
-    result
+    None
+}
+
+/// Copy the tag at `at` without its noise attributes, and return where to go on.
+/// A `<` that opens no start tag (`</div>`, `<!doctype`, `a < b`) is copied alone.
+fn copy_tag(html: &str, at: usize, out: &mut String) -> usize {
+    let bytes = html.as_bytes();
+    if !bytes.get(at + 1).is_some_and(u8::is_ascii_alphabetic) {
+        out.push('<');
+        return at + 1;
+    }
+    let mut i = at + 1;
+    while i < bytes.len() && !ends_tag_name(bytes[i]) {
+        i += 1;
+    }
+    out.push_str(&html[at..i]);
+    loop {
+        let gap = i;
+        while i < bytes.len() && is_html_space(bytes[i]) {
+            i += 1;
+        }
+        match bytes.get(i) {
+            None => {
+                out.push_str(&html[gap..]);
+                return i;
+            }
+            Some(b'>') => {
+                out.push_str(&html[gap..=i]);
+                return i + 1;
+            }
+            Some(b'/') => {
+                i += 1;
+                out.push_str(&html[gap..i]);
+                continue;
+            }
+            Some(_) => {}
+        }
+        let name_start = i;
+        while i < bytes.len() && !ends_tag_name(bytes[i]) && bytes[i] != b'=' {
+            i += 1;
+        }
+        let name = &bytes[name_start..i];
+        i = attribute_end(bytes, i);
+        if !is_noise_attribute(name) {
+            out.push_str(&html[gap..i]);
+        }
+    }
+}
+
+/// Where an attribute ends, given where its name ends. With no `=` these are
+/// the same place.
+fn attribute_end(bytes: &[u8], name_end: usize) -> usize {
+    let skip_space = |from: usize| {
+        let spaces = bytes[from..].iter().take_while(|b| is_html_space(**b));
+        from + spaces.count()
+    };
+    let equals = skip_space(name_end);
+    if bytes.get(equals) != Some(&b'=') {
+        return name_end;
+    }
+    let value = skip_space(equals + 1);
+    match bytes.get(value) {
+        Some(quote @ (b'"' | b'\'')) => bytes[value + 1..]
+            .iter()
+            .position(|b| b == quote)
+            .map_or(bytes.len(), |end| value + end + 2),
+        _ => bytes[value..]
+            .iter()
+            .position(|b| is_html_space(*b) || *b == b'>')
+            .map_or(bytes.len(), |end| value + end),
+    }
+}
+
+fn is_noise_attribute(name: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(b"style")
+        || name.eq_ignore_ascii_case(b"data-reactid")
+        || name
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"data-v-"))
 }
 
 // ============================================================================
@@ -5856,27 +5891,61 @@ mod tests {
         assert!(!result.contains("var x"));
     }
 
-    // --- strip_attributes ---
-
     #[test]
-    fn test_strip_attributes_single_word_value() {
-        // strip_attributes with style="" prefix: strips from prefix through next space or >
-        let html = r#"<div style="red">Text</div>"#;
-        let result = strip_attributes(html, &[" style=\""]);
-        // After prefix " style=\"", remaining is 'red">Text</div>'
-        // First char 'r' is not a quote, so it finds next > and strips up to it
-        assert!(result.contains("Text"));
-        assert!(!result.contains("style"));
+    fn strip_keeps_text_that_is_not_ascii() {
+        let html = "<h1>토큰 측정</h1><p>가격 100원 — ok</p>";
+        assert_eq!(strip_html_noise(html), html);
     }
 
     #[test]
-    fn test_strip_attributes_data_v() {
-        let html = r#"<div data-v-12345 class="foo">Text</div>"#;
-        let result = strip_attributes(html, &[" data-v-"]);
-        assert_eq!(result, r#"<div class="foo">Text</div>"#);
+    fn strip_removes_a_whole_attribute_and_nothing_else() {
+        // An empty value ate the text up to the next quote; a value with a
+        // space left its second half inside the tag.
+        assert_eq!(
+            strip_html_noise(r#"<td style="">가격</td><td><button class="b">구매</button></td>"#),
+            r#"<td>가격</td><td><button class="b">구매</button></td>"#
+        );
+        assert_eq!(
+            strip_html_noise(
+                r#"<tr data-v-7ba data-reactid="0" style="color: red; font-size: 12px"><td>x</td></tr>"#
+            ),
+            "<tr><td>x</td></tr>"
+        );
+        assert_eq!(
+            strip_html_noise(r#"<p style='a: b' id="x">t</p>"#),
+            r#"<p id="x">t</p>"#
+        );
+        assert_eq!(
+            strip_html_noise(r#"<img src="a.png" style="b"/>"#),
+            r#"<img src="a.png"/>"#
+        );
     }
 
-    // --- focus_script ---
+    #[test]
+    fn strip_reads_tags_and_not_text() {
+        // Looks like an attribute, but it is text or part of another value.
+        for html in [
+            r#"<pre> style="x" </pre>"#,
+            r#"<a title=' style="x"'>t</a>"#,
+            r#"<a title="a > b">t</a>"#,
+            "<p>1 < 2 and <styled-thing>x</styled-thing></p>",
+            "<!doctype html><html></html>",
+        ] {
+            assert_eq!(strip_html_noise(html), html);
+        }
+    }
+
+    #[test]
+    fn strip_handles_case_and_unfinished_input() {
+        assert_eq!(strip_html_noise("a<SCRIPT>x</Script >b"), "ab");
+        // Nothing to close the block with: keep the text, do not lose the page.
+        assert_eq!(strip_html_noise("a<script>x"), "a<script>x");
+        assert_eq!(strip_html_noise("a<!-- x"), "a<!-- x");
+        assert_eq!(strip_html_noise("<div class=\"x"), "<div class=\"x");
+        assert_eq!(strip_html_noise("<div style=\"x"), "<div");
+        assert_eq!(strip_html_noise("<div "), "<div ");
+        assert_eq!(strip_html_noise("<"), "<");
+    }
 
     #[test]
     fn test_focus_script_with_selector() {
