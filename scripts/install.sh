@@ -95,6 +95,7 @@ main() {
     fi
 
     printf '\nNext, give your agents the usage guide:\n  dalzzack install all\n'
+    printf '\nTo update later:\n  dalzzack upgrade\n'
 }
 
 main

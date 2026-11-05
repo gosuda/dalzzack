@@ -2,7 +2,7 @@
 
 Every command and flag, with platform notes. `dalzzack <command> --help` prints the same flags, and `dalzzack tools` prints them as JSON schemas. For agent-oriented usage rules, see [AGENTS.md](../AGENTS.md).
 
-All commands except `start`, `stop`, `list`, `run` require `--id <ID>` (`-i <ID>`) to target a browser instance.
+All commands except `start`, `stop`, `list`, `run`, `guide`, `install`, `tools`, and `upgrade` require `--id <ID>` (`-i <ID>`) to target a browser instance.
 
 ## Instance management
 
@@ -23,8 +23,12 @@ All commands except `start`, `stop`, `list`, `run` require `--id <ID>` (`-i <ID>
 | `list` | List running daemons (pings each, cleans up stale port/pid files). Reports `renderer_ok`, `console_transport`, `user_agent` / `user_agent_source`, `record` / `recording` (`on` \| `off` \| `never`), `version`, and, from daemon memory (so a wedged renderer still answers), `current_url`, `last_used` / `last_tool`, `engine`, `browser_version`, `navigator_webdriver`, `profile`, `ttl_s` / `expires_at_ms`. |
 | `reset [--keep-browsing-data] [--keep-rules] [--force-shared] [--dry-run] [--url URL]` | First-visit state without stopping (id, port, window and start flags kept): the profile's cookies/cache/storage/service workers, intercept rules, injected scripts, dalzzack's buffers; then about:blank. `reset` leaves the page BEFORE clearing, so unload handlers cannot write back into the emptied profile. On `--engine chrome`, a new Chrome on a new profile. Refuses on the shared profile even with no other daemon running (it outlives this one) unless `--force-shared`; `--dry-run` shows what it would clear. |
 | `record on\|off\|status [--clear]` | Switch the `--record` tape on a live daemon. `off` keeps the tape readable. The state is `recording` (`on`/`off`/`never`); `armed` only says the transport is up and stays true after `off`. |
-| `tools` | Print JSON schemas for every tool, for MCP / LLM discovery. |
-| `upgrade [--path DIR \| --git URL] [--rev REV] [--keep-daemons] [--no-locked]` | Re-install via `cargo install --force`. Stops running daemons first by default. Needs cargo: without it, it fails with `cargo_not_found` and a `download_url` for the prebuilt binary. If this binary is not the one cargo installs (a prebuilt one, say), the result carries a `note` that names both copies. |
+| `tools [NAME] [--names]` | Print the JSON schema of one tool, or only the tool names. With neither, print every schema (64 KB), for MCP / LLM discovery. |
+| `guide [TOPIC] [--all]` | Print one part of the usage guide, the list of topics, or all of it. |
+| `install claude-code\|codex\|codex-project\|all` | Add the short guide to an agent's instruction file. |
+| `install --refresh` | Rewrite the guide only in the global files that already have it. It creates no file. |
+| `upgrade [--check] [--force] [--tag TAG] [--keep-daemons]` | Check the latest release and replace this binary if it is older. `update` is the same command. It reads the tag from the `releases/latest` redirect, downloads the archive, checks its SHA-256 hash and the new binary's version, stops running daemons, replaces the binary, and refreshes the installed guides. A failed download changes nothing. `--check` prints the versions, `--force` reinstalls the same version, and `--tag` installs one tag. |
+| `upgrade --path DIR \| --git URL [--rev REV] [--no-locked]` | Build from source with `cargo install --force`. Stops running daemons first. Needs cargo. If this binary is not the one cargo installs (a release binary, say), the result carries a `note` that names both copies. |
 
 ## Navigation & page state
 
@@ -35,7 +39,8 @@ All commands except `start`, `stop`, `list`, `run` require `--id <ID>` (`-i <ID>
 | `reload [--hard]` | Reload the current page. `--hard` bypasses the HTTP cache, the Ctrl+Shift+R equivalent (Windows: CDP `Page.reload {ignoreCache:true}`; macOS: `-[WKWebView reloadFromOrigin]`) |
 | `clear-site-data [--origin URL] [--types LIST]` | Wipe an origin's storage out-of-band: service worker registrations, CacheStorage, localStorage, IndexedDB, cookies. Bypasses the page's JS world, so it still works when a proxy/membrane or a policy hides `navigator.serviceWorker`. `--origin` defaults to the current page. Types: `appcache,cache_storage,cookies,file_systems,indexeddb,local_storage,service_workers,shader_cache,websql`, or `all`. **macOS clears by HOST, not origin**: `WKWebsiteDataRecord` doesn't distinguish scheme or port, and the response says so (`scope: "host"`) |
 | `get-url` | Current URL + title |
-| `get-html [--selector <CSS>] [--strip-noise] [--max-length N]` | Page or element HTML. `--strip-noise` removes script/style/svg/comments (default true) |
+| `get-text [--selector <CSS>] [--max-length N]` | The visible text of the page or one element, with empty space removed. This is the cheapest way to read a page. |
+| `get-html [--selector <CSS>] [--no-strip-noise] [--max-length N]` | Page or element HTML. By default it removes script/style/noscript/svg/comments and `style`, `data-v-*`, and `data-reactid` attributes. `--no-strip-noise` keeps them. |
 | `screenshot [--output <PATH>] [--selector <CSS>]` | PNG capture, full viewport or cropped to element (scrolled into view first if it is not fully visible) |
 
 ## Interaction
@@ -305,13 +310,46 @@ dalzzack nav-log -i b --jq '.navigations[] | {status, challenge, final_url}'
 
 With `--field`, a `status: "failed"` result still prints whole and exits 1, so a filter never turns an error into a plausible `null`.
 
+## Output in a pipe
+
+In a terminal, a command prints indented JSON with every field. In a pipe, which is what an agent reads, it prints compact JSON in a short form, up to a size limit. `--field` and `--jq` always read the complete result. A failure is never shortened.
+
+| Flag | Effect |
+|---|---|
+| `--full` | The complete result, with no size limit. `DALZZACK_OUTPUT=full` does the same for every command of a script. On `get-frames`, also the complete `name` attributes. |
+| `--pretty` | Indented JSON in a pipe. |
+| `--max-output N` | Above N bytes (default 16384 in a pipe), write the output to a file and print `status`, `truncated`, `bytes`, `saved_to`, `keys`, and a `preview`. 0 turns this off. A `--max-length` you set is respected. |
+
+The short form changes these commands:
+
+| Command | Short form |
+|---|---|
+| `navigate`, `wait-navigation` | A normal load prints `http` and not `document`. A redirect, HTTP 400 or more, a challenge, or a second navigation keeps `document`. |
+| `describe` | `elements` are `<id> <tag> <x>,<y> <text>` strings, and `formValues` has only what no row shows. |
+| `console-logs` | `logs` are `<level> [source] L<line> <message> @<url>` strings. The shared URL is at the top, and identical lines are merged with `(xN)`. |
+| `exec-js` | Only `status` and `result`, unless `--frame`, `--world`, or `--target` was given. |
+| `list` | The fields an agent reads, plus any field that is not at its normal value. |
+| All | `null` fields and `data:` URLs of more than 200 characters go. |
+
 ## Batch mode
 
 ```bash
-dalzzack run --steps workflow.json [--id browser]
+dalzzack run -i browser --steps workflow.json      # use a live instance
+dalzzack run -i browser --steps -                  # read the steps from stdin
+dalzzack run --steps workflow.json                 # start a browser, run, exit
 ```
 
-Self-contained: starts a browser, runs steps, exits. Step file format:
+Steps can be a list of command lines, which any command that acts on a page can be:
+
+```json
+[["fill-form", "--selector", "#email", "--value", "$EMAIL"],
+ ["click", "--text", "Sign In"],
+ ["wait-for", "--selector", ".dashboard"]]
+```
+
+All steps are read before the first one runs, and a failed step stops the run with exit 1. With the id of a live instance, one result prints: `status`, `steps_run`, `steps_total`, and `last`, or `failed_step` and the failed `result`. Without one, `run` is self-contained: it starts a browser, prints one JSON line per step, and exits.
+
+The other step format uses the tool names from `dalzzack tools`:
 
 ```json
 {

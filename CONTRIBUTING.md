@@ -51,6 +51,10 @@ A tool needs three things, all in `src-tauri/src/`:
 
 The `dalzzack tools` command will surface drift between dispatcher and schema. Run it after any change in this area and confirm the new tool appears.
 
+Document a new command in `docs/commands.md` and in the topic file that fits in `src-tauri/guide/`. The installed guide, `src-tauri/guide/core.md`, stays under 4 KB, because every agent session pays for it: add to it only what most sessions need.
+
+If a tool prints fields that most calls do not need, add a short form in `src/cli/brief.rs`. Keep a failure whole, and keep any field that explains a problem.
+
 **Description guidance for LLM consumers.** Tool descriptions are read by AI agents, not humans. Be specific, lead with the verb, cross-link related tools ("prefer X over Y when…"), and call out non-obvious behaviour (e.g. "iframes resolved via CDP", "fields cleared first").
 
 ## Coding standards

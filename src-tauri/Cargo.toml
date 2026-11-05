@@ -5,7 +5,7 @@ description = "Browser automation CLI for AI agents — screenshot-first, token-
 authors = ["dalzzack contributors"]
 edition = "2021"
 license = "MIT"
-# Used by `dalzzack upgrade` (compiled in via env!("CARGO_PKG_REPOSITORY")).
+# Where `dalzzack upgrade` finds releases (compiled in via env!("CARGO_PKG_REPOSITORY")).
 repository = "https://github.com/gosuda/dalzzack"
 readme = "../README.md"
 keywords = ["browser", "automation", "ai", "agent", "cli"]

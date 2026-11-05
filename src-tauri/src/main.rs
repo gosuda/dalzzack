@@ -1216,7 +1216,7 @@ enum Cli {
     /// Inject dalzzack usage docs into AI agent config files.
     /// claude-code → ~/.claude/CLAUDE.md (global, all projects)
     /// codex → ~/.codex/AGENTS.md or $CODEX_HOME/AGENTS.md (global, all projects)
-    /// codex-project → ./AGENTS.md (current project; Codex reads only its first 32 KiB)
+    /// codex-project → ./AGENTS.md (current project)
     /// all → claude-code + codex
     Install {
         /// Target agent: claude-code, codex, codex-project, or all

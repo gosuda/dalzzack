@@ -102,4 +102,7 @@
     Write-Host ''
     Write-Host 'Next, open a new terminal and give your agents the usage guide:'
     Write-Host '  dalzzack install all'
+    Write-Host ''
+    Write-Host 'To update later:'
+    Write-Host '  dalzzack upgrade'
 }

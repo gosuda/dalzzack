@@ -28,7 +28,7 @@ We measured seven sites at a 1280×800 viewport. HTML token counts use `chars/3.
 
 **Screenshot cost is a flat ~1,500 tokens regardless of page size. HTML scales linearly with the DOM.** Break-even is around 5,000 chars of HTML. Below that, prefer HTML. Above, prefer a screenshot. Real-world sites are almost always above.
 
-So `describe` and `screenshot` are the recommended primitives. Use `get-html` only when a specific value (hidden field, token, API response) can't be seen on screen.
+So `describe` and `screenshot` are the recommended primitives, with `get-text` to read the words on a page. Use `get-html` only when a specific value (hidden field, token, API response) can't be seen on screen.
 
 ---
 
@@ -67,6 +67,10 @@ To change this, set these environment variables before you run the script:
 
 Windows needs the WebView2 runtime, which Windows 11 already has.
 
+Use a release unless you want to change dalzzack itself. To build from source, see [Development](#development).
+
+Screenshots and logs go to `%LOCALAPPDATA%\dalzzack` on Windows and `~/Library/Application Support/dalzzack` on macOS.
+
 ### Manual download
 
 Each [GitHub release](https://github.com/gosuda/dalzzack/releases) has `dalzzack-macos-universal.tar.gz` and `dalzzack-windows-x64.zip`, each with a `.sha256` file. Extract the binary into a folder on your `PATH`.
@@ -81,60 +85,20 @@ xattr -d com.apple.quarantine <path to dalzzack>
 
 If you downloaded the zip in a browser and Windows blocks the program, run `Unblock-File <path to dalzzack.exe>` once.
 
-### Build from source (needs Rust)
-
-Pick whichever fits your setup. All three install the same binary to a directory on your `PATH`.
-
-```bash
-# 1. From git (fastest — needs Rust only, no Node.js)
-cargo install --git https://github.com/gosuda/dalzzack --locked
-
-# 2. From a local clone (best if you want to hack on it)
-git clone https://github.com/gosuda/dalzzack && cd dalzzack
-cargo install --path src-tauri --locked
-
-# 3. Full developer build (rebuilds the React landing too)
-git clone https://github.com/gosuda/dalzzack && cd dalzzack
-npm install && npm run deploy   # frontend + cargo + ad-hoc codesign (macOS)
-
-dalzzack --help
-```
-
-Platforms: macOS (WKWebView) and Windows (WebView2). Linux (WebKitGTK) code exists, but CI does not build or test it and releases do not include it. On macOS the deploy script ad-hoc codesigns; the cargo paths leave codesigning to you (run `codesign --force --sign - $(which dalzzack)` if you hit Gatekeeper).
-
 ### Updating
 
-To update a prebuilt binary, run the install command again, then run `dalzzack install all` so the guide matches. Running daemons keep the old version until you stop them (`dalzzack list`, then `dalzzack stop --id <id>`). For a manual download, stop them first, because Windows cannot overwrite a `dalzzack.exe` that is running.
-
-For a build from source, the simplest path is the self-update command. It needs cargo; without it, it fails with `cargo_not_found` and prints the download link instead. It stops any running daemons, then runs `cargo install --force` against the URL baked into the binary at build time:
-
 ```bash
-dalzzack upgrade                              # default: git URL from Cargo.toml
-dalzzack upgrade --rev v1.0.0                 # pin to a tag or sha
-dalzzack upgrade --path ~/src/dalzzack/src-tauri   # local clone (dev mode)
-dalzzack upgrade --git https://github.com/<you>/dalzzack   # use a fork
+dalzzack upgrade           # install the latest release (`dalzzack update` is the same)
+dalzzack upgrade --check   # print the current and latest versions, and change nothing
 ```
 
-Flags:
+`upgrade` reads the latest release on GitHub and does nothing if you already have it. Otherwise it downloads the archive, checks its SHA-256 hash and the new binary's version, stops running daemons, replaces the binary, and refreshes the guide in your agents' files. A failed download changes nothing. It needs no Rust.
 
+- `--force`: reinstall, also at the same version.
+- `--tag v1.2.3`: install one release, for a rollback.
 - `--keep-daemons`: refuse to upgrade if any daemons are running (default is to stop them).
-- `--no-locked`: drop the `--locked` flag passed to cargo install. Use only when you've intentionally moved past the committed `Cargo.lock`.
 
-The end-to-end test in CI ran this in 2 s against a local `--path`, including stopping a live daemon.
-
-If you'd rather not use the self-update flow, the bare cargo commands work too:
-
-```bash
-cargo install --git https://github.com/gosuda/dalzzack --locked --force
-cargo install --path src-tauri --locked --force
-
-# stop daemons first if you have any running
-dalzzack list                       # see what's alive
-dalzzack stop --id <each>           # graceful shutdown
-dalzzack kill --id <id>             # escape hatch if a daemon is wedged
-```
-
-A future release will be published to crates.io so `cargo install dalzzack` works without the `--git` URL.
+Version 1.0.0 builds from source when it upgrades. To leave it, run the install command once.
 
 Coming from TaskWeaver, the private predecessor? Follow the [migration steps](CHANGELOG.md#migrating-from-taskweaver).
 
@@ -165,10 +129,11 @@ describe → click/fill → wait-for → screenshot → next
 
 Rules of thumb:
 
-- `describe` first on any new page. It labels every interactive element with a number so the agent can pick by index instead of guessing selectors.
+- `describe` first on any new page. It labels every interactive element with a number on the screenshot, and lists each element's tag, text and position.
 - Prefer `click --text` or `click --selector` over coordinate clicks. Coordinates break on resize.
 - Use `wait-for --state added` (event-driven) instead of `wait --ms` (timer-driven).
 - Use `get-requests` to read API responses instead of scraping rendered HTML.
+- Use `get-text` to read a page, and `run` for several steps in one call.
 - Use `get-html` only when a value (hidden token, raw text) cannot be seen on screen.
 
 This is `describe` on a sign-in page. Every interactive element gets a number, and the JSON result lists the same numbers with each element's tag, text and position:
@@ -189,7 +154,7 @@ This is `describe` on a sign-in page. Every interactive element gets a number, a
 
 ## Agent integration
 
-Write the usage guide into your agent's instruction file:
+Write the short usage guide into your agent's instruction file:
 
 ```bash
 dalzzack install claude-code     # ~/.claude/CLAUDE.md (global, all projects)
@@ -198,9 +163,11 @@ dalzzack install all             # both
 dalzzack install codex-project   # ./AGENTS.md (current project)
 ```
 
-Use `codex-project` only when you want the guide in one repository. Codex reads only the first 32 KiB of project files, and the guide is longer than that. To read all of it, set `project_doc_max_bytes = 65536` in `~/.codex/config.toml`. The global file has no such limit.
+Use `codex-project` only when you want the guide in one repository.
 
-The guide sits between `<!-- dalzzack-begin -->` and `<!-- dalzzack-end -->`. Running the command again replaces that block with the current guide, so run it again after an upgrade. For other agents, copy [AGENTS.md](AGENTS.md) into their instruction file.
+The guide is about 2.3 KB, because an agent pays for it in every session. It has the main commands and rules, and `dalzzack guide <topic>` prints the rest when an agent needs it.
+
+The guide sits between `<!-- dalzzack-begin -->` and `<!-- dalzzack-end -->`. `dalzzack upgrade` keeps that block up to date, and `dalzzack install --refresh` does the same by hand. For other agents, copy [AGENTS.md](AGENTS.md) into their instruction file.
 
 ---
 
@@ -221,11 +188,44 @@ dalzzack --help
 dalzzack <command> --help
 ```
 
+### Build from source (needs Rust)
+
+Pick whichever fits your setup. All three install the same binary to a directory on your `PATH`.
+
+```bash
+# 1. From git (fastest — needs Rust only, no Node.js)
+cargo install --git https://github.com/gosuda/dalzzack --locked
+
+# 2. From a local clone (best if you want to hack on it)
+git clone https://github.com/gosuda/dalzzack && cd dalzzack
+cargo install --path src-tauri --locked
+
+# 3. Full developer build (rebuilds the React landing too)
+git clone https://github.com/gosuda/dalzzack && cd dalzzack
+npm install && npm run deploy   # frontend + cargo + ad-hoc codesign (macOS)
+
+dalzzack --help
+```
+
+Platforms: macOS (WKWebView) and Windows (WebView2). Linux (WebKitGTK) code exists, but CI does not build or test it and releases do not include it. On macOS the deploy script ad-hoc codesigns; the cargo paths leave codesigning to you (run `codesign --force --sign - $(which dalzzack)` if you hit Gatekeeper).
+
+To update a build from source, `upgrade` can run cargo for you. It stops any running daemons first.
+
+```bash
+dalzzack upgrade --path ~/src/dalzzack/src-tauri   # local clone (dev mode)
+dalzzack upgrade --git https://github.com/<you>/dalzzack   # use a fork
+dalzzack upgrade --rev v1.0.0                      # pin to a tag or sha
+```
+
+`--no-locked` drops the `--locked` flag passed to cargo install. Use it only when you've intentionally moved past the committed `Cargo.lock`.
+
+A future release will be published to crates.io so `cargo install dalzzack` works without the `--git` URL.
+
 ### CI / release
 
 GitHub Actions workflows:
-- **CI** (`ci.yml`): format check, Clippy and unit tests (macOS), build (macOS, Windows), smoke test (macOS)
-- **Release** (`release.yml`): on `v*` tags, builds the binary with `tauri build --no-bundle` and attaches `dalzzack-macos-universal.tar.gz` and `dalzzack-windows-x64.zip`, each with a `.sha256` file, to the GitHub release. It publishes no installers: they did not put `dalzzack` on `PATH`. A tag with a hyphen, such as `v1.0.0-rc.1`, makes a pre-release, which the `releases/latest` links skip.
+- **CI** (`ci.yml`): format check, Clippy (macOS), unit tests and build (macOS, Windows), smoke test (macOS)
+- **Release** (`release.yml`): on `v*` tags, checks the tag against the version files, creates a draft, and publishes it after all builds pass. It builds the binary with `tauri build --no-bundle` and attaches `dalzzack-macos-universal.tar.gz` and `dalzzack-windows-x64.zip`, each with a `.sha256` file, to the GitHub release. It publishes no installers: they did not put `dalzzack` on `PATH`. A tag with a hyphen, such as `v1.0.0-rc.1`, makes a pre-release, which the `releases/latest` links skip.
 
 ---
 
