@@ -15,4 +15,5 @@
 
 **Batch:** `run [--id ID] --steps FILE` — run several steps in one call. `-` reads the steps from stdin. Steps are a JSON list of command lines, `[["click", "--text", "OK"], ["wait-for", "--selector", ".done"]]`, or `{"steps": [{"tool": "click_element", "args": {"text": "OK"}}]}` with the names from `dalzzack tools`. `$ENV_VAR` references are expanded. All steps are read before the first one runs.
 - With the id of a live instance, the steps run there and one result prints: `status`, `steps_run`, `steps_total`, and `last`, or `failed_step` and the failed `result`. A failed step stops the run with exit 1.
-- Without one, it starts a browser, prints one JSON line per step, and exits. A failed step stops the run with exit 1.
+- Without one, it starts a browser, prints one JSON line per step with the whole result, and exits. A failed step stops the run with exit 1.
+- A step takes its instance from `run`, so a step with `-i` is refused.

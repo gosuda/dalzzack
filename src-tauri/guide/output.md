@@ -9,7 +9,7 @@ The short form leaves out what most runs do not need, and it stays one JSON docu
 
 - `--full` — the complete result, with no size limit. `DALZZACK_OUTPUT=full` does the same for every command of a script. On `get-frames`, also the complete `name` attributes.
 - `--pretty` — indented JSON in a pipe.
-- `--max-output N` — above N bytes (default 16384 in a pipe), write the output to a file and print `status`, `truncated`, `bytes`, `saved_to`, `keys`, and a `preview`. 0 turns this off. A `--max-length` you set is respected. Saved files are in the data folder and are deleted after a day.
+- `--max-output N` — above N bytes (default 16384 in a pipe), write the output to a file and print `status`, `truncated`, `bytes`, `saved_to`, `keys`, and a `preview`. 0 turns this off. A failure, the output of `--field` or `--jq`, and a result with a `--max-length` you set are always printed whole. So is each line of `run` without a live instance. Saved files are in the data folder and are deleted after a day.
 
 Files go to `%LOCALAPPDATA%\dalzzack` on Windows and `~/Library/Application Support/dalzzack` on macOS: `sites/<id>/` for screenshots, `logs/` for daemon logs (7 days), `output/` for saved output. `DALZZACK_LOG=debug` gives a longer log.
 

@@ -52,6 +52,7 @@ struct Args {
     full: bool,
     /// Save output larger than N bytes to a file and print a summary. 0 turns this
     /// off. The default is 16384 in a pipe, and no limit in a terminal or with --full.
+    /// A failure and the output of --field or --jq are always printed whole.
     #[arg(long, global = true, value_name = "N")]
     max_output: Option<usize>,
 }
@@ -1442,7 +1443,7 @@ fn emit(
     }
     match dalzzack_lib::cli::output::render(v, filter) {
         Ok(text) => {
-            println!("{}", limited(text, v, tool, args, filter));
+            println!("{text}");
             // On stderr, so stdout stays exactly what was asked for: a key
             // the output does not have, but a differently spelled one does
             // (`httpOnly` vs `http_only`), silently reads as null otherwise.

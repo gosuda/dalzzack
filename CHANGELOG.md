@@ -38,8 +38,8 @@ All notable changes to dalzzack. The format loosely follows
   builds from source when it upgrades, so to leave it, run the install command once.
 - Output in a pipe is shorter, and a terminal is unchanged. JSON is compact, and
   `navigate`, `wait-navigation`, `describe`, `console-logs`, `exec-js`, and `list`
-  print a short form: 73% to 87% smaller on a test page. Over 16 KiB, the output goes
-  to a file and a summary prints. Failures are never shortened. `--field` and `--jq`
+  print a short form: 73% to 87% smaller on a test page. Over 16 KiB, the default
+  output goes to a file and a summary prints. Failures are never shortened. `--field` and `--jq`
   read the complete result, and `--full` or `DALZZACK_OUTPUT=full` restore it. A
   script that reads fields of those commands without a filter needs one of these.
 - The installed guide is about 2.3 KB and not 53 KB, because every agent session

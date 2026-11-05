@@ -318,7 +318,7 @@ In a terminal, a command prints indented JSON with every field. In a pipe, which
 |---|---|
 | `--full` | The complete result, with no size limit. `DALZZACK_OUTPUT=full` does the same for every command of a script. On `get-frames`, also the complete `name` attributes. |
 | `--pretty` | Indented JSON in a pipe. |
-| `--max-output N` | Above N bytes (default 16384 in a pipe), write the output to a file and print `status`, `truncated`, `bytes`, `saved_to`, `keys`, and a `preview`. 0 turns this off. A `--max-length` you set is respected. |
+| `--max-output N` | Above N bytes (default 16384 in a pipe), write the output to a file and print `status`, `truncated`, `bytes`, `saved_to`, `keys`, and a `preview`. 0 turns this off. A failure, the output of `--field` or `--jq`, and a result with a `--max-length` you set are always printed whole. |
 
 The short form changes these commands:
 
@@ -347,7 +347,7 @@ Steps can be a list of command lines, which any command that acts on a page can 
  ["wait-for", "--selector", ".dashboard"]]
 ```
 
-All steps are read before the first one runs, and a failed step stops the run with exit 1. With the id of a live instance, one result prints: `status`, `steps_run`, `steps_total`, and `last`, or `failed_step` and the failed `result`. Without one, `run` is self-contained: it starts a browser, prints one JSON line per step, and exits.
+All steps are read before the first one runs, and a failed step stops the run with exit 1. A step takes its instance from `run`, so a step with `-i` is refused. With the id of a live instance, one result prints: `status`, `steps_run`, `steps_total`, and `last`, or `failed_step` and the failed `result`. Without one, `run` is self-contained: it starts a browser, prints one JSON line per step with the whole result, and exits.
 
 The other step format uses the tool names from `dalzzack tools`:
 

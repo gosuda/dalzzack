@@ -339,9 +339,10 @@ pub fn render(v: &Value, f: &OutputFilter) -> Result<String, String> {
     Ok(show(&Value::Object(obj), f))
 }
 
-/// `text` as it is, or a summary when it is over the limit. A result of 5 MB
-/// printed to an agent would end its session, and a harness that cuts the text
-/// loses the end of it, so the whole text goes to a file.
+/// The default print of a result: `text` as it is, or a summary when it is over
+/// the limit. A result of 5 MB printed to an agent would end its session, and a
+/// harness that cuts the text loses the end of it, so the whole text goes to a
+/// file. Output that a filter chose never comes here: the caller asked for it.
 pub fn limited(text: String, result: &Value, tool: &str, args: &Value, f: &OutputFilter) -> String {
     let dir = crate::state::data_dir().join("output");
     limited_in(&dir, text, result, tool, args, f)
@@ -355,25 +356,34 @@ fn limited_in(
     args: &Value,
     f: &OutputFilter,
 ) -> String {
-    // A caller that set a length has already decided how much to read.
-    let asked_for_a_length = !args["max_length"].is_null();
+    // A failure stays whole, and a caller that set a length has already decided
+    // how much to read.
+    let keep_whole = result["status"] == "failed" || !args["max_length"].is_null();
     match f.max_output {
-        Some(limit) if text.len() > limit && !asked_for_a_length => {}
+        Some(limit) if text.len() > limit && !keep_whole => {}
         _ => return text,
     }
+    let saved_to = match save_output(dir, tool, &text) {
+        Ok(path) => path,
+        Err(e) => {
+            // The text has no other home, so it stays.
+            eprintln!(
+                "[dalzzack] printing all the output: cannot save it in {}: {e}",
+                dir.display()
+            );
+            return text;
+        }
+    };
     let mut summary = json!({
         "status": result["status"],
         "truncated": true,
         "bytes": text.len(),
+        "saved_to": saved_to.display().to_string(),
         "preview": text.chars().take(PREVIEW_CHARS).collect::<String>(),
         "hint": "This output is over the limit, so all of it is in the file `saved_to`. Read the \
                  file, or narrow the result with --field, --jq, or --selector. --max-output \
                  changes the limit.",
     });
-    match save_output(dir, tool, &text) {
-        Ok(path) => summary["saved_to"] = json!(path.display().to_string()),
-        Err(e) => summary["save_error"] = json!(e.to_string()),
-    }
     if let Some(fields) = result.as_object() {
         summary["keys"] = json!(fields.keys().collect::<Vec<_>>());
     }
@@ -492,12 +502,12 @@ mod tests {
             max_output: Some(100),
             ..Default::default()
         };
-        let result = json!({ "status": "failed", "result": "x".repeat(500) });
+        let result = json!({ "status": "completed", "result": "x".repeat(500) });
         let text = result.to_string();
 
         let summary = limited_in(&dir, text.clone(), &result, "execute_js", &json!({}), &f);
         let summary: Value = serde_json::from_str(&summary).unwrap();
-        assert_eq!(summary["status"], "failed");
+        assert_eq!(summary["status"], "completed");
         assert_eq!(summary["truncated"], true);
         assert_eq!(summary["bytes"], text.len());
         assert_eq!(summary["keys"], json!(["result", "status"]));
@@ -506,6 +516,40 @@ mod tests {
         assert!(saved.contains("execute_js-"));
         assert_eq!(std::fs::read_to_string(saved).unwrap(), text);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failure_is_never_replaced_by_a_summary() {
+        let dir = std::env::temp_dir().join("dalzzack-output-never-created-2");
+        let f = OutputFilter {
+            max_output: Some(100),
+            ..Default::default()
+        };
+        let result = json!({ "status": "failed", "error": "X", "message": "m".repeat(500) });
+        let text = result.to_string();
+        assert_eq!(
+            limited_in(&dir, text.clone(), &result, "click", &json!({}), &f),
+            text
+        );
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn output_that_cannot_be_saved_is_printed() {
+        // A file where the folder must go, so the folder cannot be created.
+        let dir = std::env::temp_dir().join(format!("dalzzack-not-a-dir-{}", std::process::id()));
+        std::fs::write(&dir, "").unwrap();
+        let f = OutputFilter {
+            max_output: Some(100),
+            ..Default::default()
+        };
+        let result = json!({ "status": "completed" });
+        let text = "x".repeat(500);
+        assert_eq!(
+            limited_in(&dir, text.clone(), &result, "get_html", &json!({}), &f),
+            text
+        );
+        std::fs::remove_file(&dir).unwrap();
     }
 
     #[test]
