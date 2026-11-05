@@ -2915,30 +2915,46 @@ fn install_docs(target: &str) {
 mod tests {
     use super::*;
 
+    /// A debug build needs more stack to parse a command line than a test thread
+    /// has. `main` has this much too.
+    fn with_main_stack(test: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(test)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn a_step_is_a_command_line() {
         use serde_json::json;
-        let step = command_step(&json!(["click", "--text", "Sign In"])).unwrap();
-        assert_eq!(step.tool, "click_element");
-        assert_eq!(step.args.unwrap()["text"], "Sign In");
+        with_main_stack(|| {
+            let step = command_step(&json!(["click", "--text", "Sign In"])).unwrap();
+            assert_eq!(step.tool, "click_element");
+            assert_eq!(step.args.unwrap()["text"], "Sign In");
 
-        let step = command_step(&json!(["get-html", "--selector", "h1"])).unwrap();
-        assert_eq!(step.tool, "get_html");
+            let step = command_step(&json!(["get-html", "--selector", "h1"])).unwrap();
+            assert_eq!(step.tool, "get_html");
+        });
     }
 
     #[test]
     fn a_step_that_is_not_a_page_command_is_refused() {
         use serde_json::json;
-        for line in [
-            json!(["stop", "--id", "b"]),
-            json!(["run", "--steps", "x.json"]),
-            json!(["upgrade"]),
-            json!(["no-such-command"]),
-            json!(["click", 5]),
-            json!("click"),
-        ] {
-            assert!(command_step(&line).is_err(), "{line}");
-        }
+        with_main_stack(|| {
+            for line in [
+                json!(["stop", "--id", "b"]),
+                json!(["run", "--steps", "x.json"]),
+                json!(["guide"]),
+                json!(["upgrade"]),
+                json!(["no-such-command"]),
+                json!(["click", 5]),
+                json!("click"),
+            ] {
+                assert!(command_step(&line).is_err(), "{line}");
+            }
+        });
     }
 
     #[test]
