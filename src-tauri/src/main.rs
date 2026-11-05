@@ -1165,7 +1165,12 @@ enum Cli {
     /// all → claude-code + codex
     Install {
         /// Target agent: claude-code, codex, codex-project, or all
-        target: String,
+        #[arg(required_unless_present = "refresh")]
+        target: Option<String>,
+        /// Rewrite the guide only in global files that already have it.
+        /// This creates no file.
+        #[arg(long, conflicts_with = "target")]
+        refresh: bool,
     },
 
     /// Capture a chrome-tracing-compatible timeline for `duration_ms`. Windows uses real
@@ -1620,9 +1625,10 @@ fn main() {
             let instance_id = id.unwrap_or_else(|| format!("run-{}", std::process::id()));
             dalzzack_lib::cli::run_steps(&instance_id, &steps);
         }
-        Cli::Install { target } => {
-            install_docs(&target);
-        }
+        Cli::Install { target, refresh } => match target {
+            Some(target) if !refresh => install_docs(&target),
+            _ => refresh_docs(),
+        },
         Cli::Tools => {
             let defs = dalzzack_lib::tools::definitions::get_tool_definitions();
             let v = serde_json::to_value(&defs).unwrap_or_else(|_| serde_json::json!([]));
@@ -2605,6 +2611,46 @@ WebView2 is Chromium but not Chrome, and the differences are what bot defences m
 <!-- dalzzack-end -->
 "##;
 
+const BLOCK_BEGIN: &str = "<!-- dalzzack-begin -->";
+const BLOCK_END: &str = "<!-- dalzzack-end -->";
+
+/// The text before and after the dalzzack block; `None` when there is no block.
+///
+/// Anything but one begin marker before one end marker is an error: without an
+/// end marker, the text after the begin marker is the user's own.
+fn split_around_block(text: &str) -> Result<Option<(&str, &str)>, String> {
+    let (begins, ends) = (
+        text.matches(BLOCK_BEGIN).count(),
+        text.matches(BLOCK_END).count(),
+    );
+    if begins == 0 && ends == 0 {
+        return Ok(None);
+    }
+    match (text.find(BLOCK_BEGIN), text.find(BLOCK_END)) {
+        (Some(begin), Some(end)) if begins == 1 && ends == 1 && begin < end => {
+            Ok(Some((&text[..begin], &text[end + BLOCK_END.len()..])))
+        }
+        _ => Err(format!(
+            "expected one {BLOCK_BEGIN} before one {BLOCK_END}, found {begins} and {ends}. \
+             Fix the markers by hand. The file was not changed."
+        )),
+    }
+}
+
+/// `existing` with its block replaced, or with a block added at the end.
+fn with_docs(existing: &str) -> Result<String, String> {
+    Ok(match split_around_block(existing)? {
+        Some((before, after)) => match after.trim_start_matches(['\r', '\n']) {
+            "" => format!("{before}{DALZZACK_DOCS}"),
+            after => format!("{before}{DALZZACK_DOCS}\n{after}"),
+        },
+        None => match existing.trim_end() {
+            "" => DALZZACK_DOCS.to_string(),
+            kept => format!("{kept}\n\n{DALZZACK_DOCS}"),
+        },
+    })
+}
+
 fn inject_docs(file_path: &std::path::Path, label: &str) {
     use std::fs;
 
@@ -2612,44 +2658,73 @@ fn inject_docs(file_path: &std::path::Path, label: &str) {
         fs::create_dir_all(parent).ok();
     }
 
-    let existing = fs::read_to_string(file_path).unwrap_or_default();
-
-    // Remove existing section between markers
-    let cleaned = if existing.contains("<!-- dalzzack-begin -->") {
-        let mut result = String::new();
-        let mut skip = false;
-        for line in existing.lines() {
-            if line.contains("<!-- dalzzack-begin -->") {
-                skip = true;
-                continue;
-            }
-            if line.contains("<!-- dalzzack-end -->") {
-                skip = false;
-                continue;
-            }
-            if !skip {
-                result.push_str(line);
-                result.push('\n');
-            }
-        }
-        eprintln!("  Updated existing dalzzack section in {}", label);
-        result
-    } else {
-        existing
+    // Only a missing file counts as empty: writing after any other read error
+    // would replace the user's file.
+    let existing = match fs::read_to_string(file_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => fail_install(file_path, &format!("cannot read the file: {e}")),
     };
-
-    let mut final_content = cleaned.trim_end().to_string();
-    if !final_content.is_empty() {
-        final_content.push_str("\n\n");
+    let updated = with_docs(&existing).unwrap_or_else(|message| fail_install(file_path, &message));
+    if existing.contains(BLOCK_BEGIN) {
+        eprintln!("  Updated existing dalzzack section in {}", label);
     }
-    final_content.push_str(DALZZACK_DOCS);
 
-    fs::write(file_path, final_content).unwrap_or_else(|e| {
+    fs::write(file_path, updated).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", label, e);
         std::process::exit(1);
     });
 
     eprintln!("  Injected into {}", file_path.display());
+}
+
+fn fail_install(file: &std::path::Path, message: &str) -> ! {
+    println!(
+        "{}",
+        serde_json::json!({
+            "status": "failed",
+            "error": "GUIDE_NOT_INSTALLED",
+            "file": file.display().to_string(),
+            "message": message,
+        })
+    );
+    std::process::exit(1);
+}
+
+/// Rewrite the guide where it is already installed. `upgrade` runs this with
+/// the new binary, so the guide always matches the commands. It creates nothing:
+/// an agent the user did not set up stays that way.
+fn refresh_docs() {
+    let mut refreshed = Vec::new();
+    let mut failed = Vec::new();
+    for path in [
+        home_dir().join(".claude").join("CLAUDE.md"),
+        codex_home().join("AGENTS.md"),
+    ] {
+        let Ok(existing) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !existing.contains(BLOCK_BEGIN) && !existing.contains(BLOCK_END) {
+            continue;
+        }
+        let written = with_docs(&existing)
+            .and_then(|updated| std::fs::write(&path, updated).map_err(|e| e.to_string()));
+        match written {
+            Ok(()) => refreshed.push(path.display().to_string()),
+            Err(message) => failed.push(serde_json::json!({
+                "file": path.display().to_string(),
+                "message": message,
+            })),
+        }
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "status": if failed.is_empty() { "completed" } else { "failed" },
+            "refreshed": refreshed,
+            "failed": failed,
+        })
+    );
 }
 
 /// Compile-time repository URL (from Cargo.toml `repository = "..."`).
@@ -3089,6 +3164,39 @@ fn install_docs(target: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_guide_replaces_its_own_block_and_leaves_the_rest() {
+        let file = format!("# Mine\r\n\r\n{BLOCK_BEGIN}\nold\n{BLOCK_END}\n\n# Also mine\n");
+        let updated = with_docs(&file).unwrap();
+        assert!(updated.starts_with("# Mine\r\n\r\n"));
+        assert!(updated.ends_with("\n# Also mine\n"));
+        assert!(updated.contains(DALZZACK_DOCS));
+        assert!(!updated.contains("OLD GUIDE"));
+        // Running it again changes nothing.
+        assert_eq!(with_docs(&updated).unwrap(), updated);
+    }
+
+    #[test]
+    fn the_guide_goes_at_the_end_of_a_file_without_a_block() {
+        assert_eq!(with_docs("").unwrap(), DALZZACK_DOCS);
+        assert_eq!(
+            with_docs("# Mine\n\n").unwrap(),
+            format!("# Mine\n\n{DALZZACK_DOCS}")
+        );
+    }
+
+    #[test]
+    fn a_broken_block_changes_nothing() {
+        for file in [
+            format!("{BLOCK_BEGIN}\nmy notes, with no end marker\n"),
+            format!("{BLOCK_END}\nthe wrong order\n{BLOCK_BEGIN}\n"),
+            format!("{BLOCK_BEGIN}\n{BLOCK_END}\n{BLOCK_BEGIN}\n{BLOCK_END}\n"),
+            format!("only an end marker {BLOCK_END}\n"),
+        ] {
+            assert!(with_docs(&file).is_err(), "{file}");
+        }
+    }
 
     #[test]
     fn release_download_url_points_at_the_latest_fixed_name_asset() {
