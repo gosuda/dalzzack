@@ -19,6 +19,9 @@ pub struct OutputFilter {
     pub jq: Option<String>,
     /// Print string results without JSON quotes (`jq -r`).
     pub raw: bool,
+    /// Print indented JSON. Every other byte of indent is a token nobody reads
+    /// when the output goes to an agent.
+    pub pretty: bool,
 }
 
 impl OutputFilter {
@@ -296,12 +299,12 @@ pub fn render(v: &Value, f: &OutputFilter) -> Result<String, String> {
         let outs = run_jq(program, v)?;
         return Ok(outs
             .iter()
-            .map(|o| show(o, f.raw))
+            .map(|o| show(o, f))
             .collect::<Vec<_>>()
             .join("\n"));
     }
     if f.fields.is_empty() {
-        return Ok(show(v, f.raw));
+        return Ok(show(v, f));
     }
     let pick = |path: &str| -> Result<Value, String> {
         let outs = run_jq(&field_to_jq(path), v)?;
@@ -312,25 +315,27 @@ pub fn render(v: &Value, f: &OutputFilter) -> Result<String, String> {
         })
     };
     if f.fields.len() == 1 {
-        return Ok(show(&pick(&f.fields[0])?, f.raw));
+        return Ok(show(&pick(&f.fields[0])?, f));
     }
     let mut obj = serde_json::Map::new();
     for p in &f.fields {
         obj.insert(p.clone(), pick(p)?);
     }
-    Ok(show(&Value::Object(obj), f.raw))
+    Ok(show(&Value::Object(obj), f))
 }
 
-fn show(v: &Value, raw: bool) -> String {
+/// One value as text, the way `f` asks for it.
+pub fn show(v: &Value, f: &OutputFilter) -> String {
     match v {
-        Value::String(s) if raw => s.clone(),
+        Value::String(s) if f.raw => s.clone(),
         // A fanned-out list of strings under --raw: one per line, like `jq -r .[]`.
-        Value::Array(items) if raw && items.iter().all(|i| i.is_string()) => items
+        Value::Array(items) if f.raw && items.iter().all(|i| i.is_string()) => items
             .iter()
             .filter_map(|i| i.as_str())
             .collect::<Vec<_>>()
             .join("\n"),
-        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+        other if f.pretty => serde_json::to_string_pretty(other).unwrap_or_default(),
+        other => serde_json::to_string(other).unwrap_or_default(),
     }
 }
 
@@ -400,6 +405,18 @@ mod tests {
         let back: Value = serde_json::from_str(&many).unwrap();
         assert_eq!(back["status"], "completed");
         assert_eq!(back["instances[].port"], json!([1, 2]));
+    }
+
+    #[test]
+    fn json_is_compact_unless_pretty_is_asked_for() {
+        let v = json!({ "a": [1] });
+        let plain = OutputFilter::default();
+        assert_eq!(render(&v, &plain).unwrap(), r#"{"a":[1]}"#);
+        let pretty = OutputFilter {
+            pretty: true,
+            ..Default::default()
+        };
+        assert!(render(&v, &pretty).unwrap().contains("\n  "));
     }
 
     #[test]

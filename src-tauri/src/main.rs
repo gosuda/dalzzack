@@ -9,6 +9,7 @@
 // A GUI-only build would need it; we use the console subsystem instead.
 
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -38,6 +39,9 @@ struct Args {
     /// With --field / --jq: print string results without JSON quotes (like `jq -r`).
     #[arg(long, global = true)]
     raw: bool,
+    /// Print indented JSON. This is the default in a terminal; a pipe gets compact JSON.
+    #[arg(long, global = true)]
+    pretty: bool,
 }
 
 #[derive(Subcommand)]
@@ -1361,12 +1365,12 @@ fn parse_engine_or_exit(raw: &str) -> dalzzack_lib::engine::Engine {
 /// the tool for handling failures yourself.
 fn emit(v: &serde_json::Value, filter: &dalzzack_lib::cli::output::OutputFilter) -> i32 {
     if !filter.is_active() {
-        println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+        println!("{}", dalzzack_lib::cli::output::show(v, filter));
         return 0;
     }
     let failed = v.get("status").and_then(|s| s.as_str()) == Some("failed");
     if !filter.fields.is_empty() && failed {
-        println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+        println!("{}", dalzzack_lib::cli::output::show(v, filter));
         eprintln!("(result is a failure — printed whole instead of --field)");
         return 1;
     }
@@ -1412,7 +1416,7 @@ fn emit_result(
             // A filter promises "the whole failure, on stdout, exit 1" — a
             // runner that asked for one field reads stdout only.
             if filter.is_active() {
-                println!("{}", serde_json::to_string_pretty(&e).unwrap_or_default());
+                println!("{}", dalzzack_lib::cli::output::show(&e, filter));
             } else {
                 eprintln!("{e}");
             }
@@ -1445,6 +1449,7 @@ fn main() {
                 fields: a.field,
                 jq: a.jq,
                 raw: a.raw,
+                pretty: a.pretty || std::io::stdout().is_terminal(),
             },
         ),
         Err(e) => {
