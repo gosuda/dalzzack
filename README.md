@@ -95,7 +95,7 @@ dalzzack upgrade --check   # print the current and latest versions, and change n
 `upgrade` reads the latest release on GitHub and does nothing if you already have it. Otherwise it downloads the archive, checks its SHA-256 hash and the new binary's version, stops running daemons, replaces the binary, and refreshes the guide in your agents' files. A failed download changes nothing. It needs no Rust.
 
 - `--force`: reinstall, also at the same version.
-- `--tag v1.2.3`: install one release, for a rollback.
+- `--tag v1.2.3`: install one release, for a rollback. A release candidate reports the version of its release, so going from a candidate to that release needs `--force`.
 - `--keep-daemons`: refuse to upgrade if any daemons are running (default is to stop them).
 
 Version 1.0.0 builds from source when it upgrades. To leave it, run the install command once.

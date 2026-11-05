@@ -25,7 +25,7 @@ dalzzack run -i b --steps - <<'EOF'
 EOF
 ```
 
-Output in a pipe is short: compact JSON, the fields most runs need, and at most 16 KiB. Above that, the whole output is in the file named by `saved_to`. A failure always prints in full. `--full` prints every field. `--field PATH` and `--jq EXPR` read the full result, as in `--field document.hops[0].status`.
+Output in a pipe is short: compact JSON, the fields most runs need, and at most 16 KiB. Above that, the whole output is in the file named by `saved_to`. A failure always prints in full. `--full` prints every field. `--field PATH` and `--jq EXPR` read the full result and have no size limit, as in `--field document.hops[0].status`.
 
 Rules:
 
