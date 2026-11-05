@@ -324,7 +324,7 @@ The short form changes these commands:
 
 | Command | Short form |
 |---|---|
-| `navigate`, `wait-navigation` | A normal load prints `http` and not `document`. A redirect, HTTP 400 or more, a challenge, or a second navigation keeps `document`. |
+| `navigate`, `wait-navigation` | A normal load prints `http` and not `document`. A redirect, HTTP 400 or more, a challenge, a second navigation, or a response that did not commit keeps `document`. |
 | `describe` | `elements` are `<id> <tag> <x>,<y> <text>` strings, and `formValues` has only what no row shows. |
 | `console-logs` | `logs` are `<level> [source] L<line> <message> @<url>` strings. The shared URL is at the top, and identical lines are merged with `(xN)`. |
 | `exec-js` | Only `status` and `result`, unless `--frame`, `--world`, or `--target` was given. |

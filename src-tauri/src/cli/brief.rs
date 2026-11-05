@@ -60,7 +60,8 @@ fn shorten_data_url(value: Value) -> Value {
 /// with something to explain keeps the details.
 fn plain_document(result: &Value) -> Value {
     let document = &result["document"];
-    let plain = document["redirects"] == 0
+    let plain = document["committed"] == true
+        && document["redirects"] == 0
         && document["challenge"].is_null()
         && document["status"].as_i64().is_some_and(|s| s < 400)
         && result["navigations_during_wait"].as_u64().unwrap_or(1) <= 1;
@@ -274,6 +275,7 @@ mod tests {
             "navigations_during_wait": 1,
             "document": {
                 "challenge": null,
+                "committed": true,
                 "committed_url": URL,
                 "final_url": URL,
                 "requested_url": URL,
@@ -311,6 +313,10 @@ mod tests {
         let mut reloaded = navigate_result(0, 200);
         reloaded["navigations_during_wait"] = json!(2);
         assert!(brief("navigate", &json!({}), &reloaded)["document"].is_object());
+        // A download answers 200, and the page on screen does not change.
+        let mut download = navigate_result(0, 200);
+        download["document"]["committed"] = json!(false);
+        assert!(brief("navigate", &json!({}), &download)["document"].is_object());
     }
 
     #[test]
