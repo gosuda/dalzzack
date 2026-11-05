@@ -1968,14 +1968,7 @@ async fn tool_get_html(args: &Value) -> Result<Value> {
 
                 // 4. max_length: limit the character count
                 let (final_html, truncated) = if max_length > 0 && processed.len() > max_length {
-                    // Cut on a char boundary
-                    let safe_end = processed
-                        .char_indices()
-                        .take_while(|&(idx, _)| idx <= max_length)
-                        .last()
-                        .map(|(idx, c)| idx + c.len_utf8())
-                        .unwrap_or(max_length.min(processed.len()));
-                    (processed[..safe_end].to_string(), true)
+                    (cut_text(&processed, max_length).to_string(), true)
                 } else {
                     (processed, false)
                 };

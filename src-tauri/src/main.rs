@@ -1436,7 +1436,7 @@ fn emit(
     }
     let failed = v.get("status").and_then(|s| s.as_str()) == Some("failed");
     if !filter.fields.is_empty() && failed {
-        println!("{}", dalzzack_lib::cli::output::show(v, filter));
+        println!("{}", show(v, filter));
         eprintln!("(result is a failure — printed whole instead of --field)");
         return 1;
     }
@@ -1491,11 +1491,16 @@ fn emit_result(
     }
 }
 
+/// The first line of a clap error, which says what is wrong.
+fn usage_message(e: &clap::Error) -> String {
+    let text = e.render().to_string();
+    text.lines().next().unwrap_or("invalid usage").to_string()
+}
+
 fn main() {
-    let full_flag;
     // Usage errors must reach stdout too: clap prints them to stderr and a
     // runner with `2>/dev/null` sees a successful-looking empty result.
-    let (cli, filter) = match Args::try_parse() {
+    let (cli, filter, full_flag) = match Args::try_parse() {
         // clap's `conflicts_with` is not enforced when the two global flags
         // sit on opposite sides of the subcommand (`--field x tools --jq .`),
         // and one would then be silently ignored.
@@ -1514,7 +1519,6 @@ fn main() {
             let terminal = std::io::stdout().is_terminal();
             let full_env = std::env::var_os("DALZZACK_OUTPUT").is_some_and(|v| v == "full");
             let full = a.full || terminal || full_env;
-            full_flag = a.full;
             (
                 a.cmd,
                 dalzzack_lib::cli::output::OutputFilter {
@@ -1530,6 +1534,7 @@ fn main() {
                         None => Some(dalzzack_lib::cli::output::DEFAULT_MAX_OUTPUT),
                     },
                 },
+                a.full,
             )
         }
         Err(e) => {
@@ -1537,19 +1542,12 @@ fn main() {
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
                 e.exit();
             }
-            let first_line = e
-                .render()
-                .to_string()
-                .lines()
-                .next()
-                .unwrap_or("invalid usage")
-                .to_string();
             println!(
                 "{}",
                 serde_json::json!({
                     "status": "failed",
                     "error": "USAGE",
-                    "message": first_line,
+                    "message": usage_message(&e),
                 })
             );
             // Full clap rendering still goes to stderr for humans.
@@ -1826,14 +1824,8 @@ fn command_step(line: &serde_json::Value) -> Result<dalzzack_lib::cli::Step, Str
         .map(|words| words.iter().map(|word| word.as_str()).collect())
         .unwrap_or_default();
     let words = words.ok_or("expected a list of strings")?;
-    let parsed = Args::try_parse_from(std::iter::once("dalzzack").chain(words)).map_err(|e| {
-        e.render()
-            .to_string()
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_string()
-    })?;
+    let parsed = Args::try_parse_from(std::iter::once("dalzzack").chain(words))
+        .map_err(|e| usage_message(&e))?;
     if matches!(
         parsed.cmd,
         Cli::Start { .. }
