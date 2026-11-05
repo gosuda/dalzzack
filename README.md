@@ -30,6 +30,27 @@ We measured seven sites at a 1280×800 viewport. HTML token counts use `chars/3.
 
 So `describe` and `screenshot` are the recommended primitives, with `get-text` to read the words on a page. Use `get-html` only when a specific value (hidden field, token, API response) can't be seen on screen.
 
+### What an agent pays in 1.1
+
+An agent pays for the usage guide in every session, and for the output of every command. Version 1.1 cuts both with program logic, so an agent saves tokens with no extra flag.
+
+| What the agent reads | 1.0 | 1.1 | Saved |
+|---|---:|---:|---:|
+| Usage guide, in every session | 16,000 | 700 | 96% |
+| Output of an 8-step flow | 3,119 | 851 | 73% |
+| `navigate` | 495 | 58 | 88% |
+| `describe` | 1,688 | 429 | 75% |
+| `console-logs` (88 lines) | 9,533 | 804 | 92% |
+| `exec-js` | 57 | 13 | 77% |
+
+These are tokens, estimated with `chars/3.3` as above. The guide row compares the two guides. The other rows come from one local test page of 74 KB, so real pages will differ. The 1.0 column is the complete indented output, which `--full --pretty` still prints. The flow is `navigate`, `describe`, two `fill-form` calls, `click`, `wait-for`, `console-logs --level error`, and `screenshot`, without the cost of opening the image.
+
+- The installed guide is 2.3 KB, not 53 KB. `dalzzack guide <topic>` prints the rest when an agent needs it.
+- In a pipe, a command prints compact JSON in a short form. A failure always prints in full, and `--full`, `--field`, and `--jq` read the complete result.
+- Output over 16 KiB goes to a file, and a summary prints. A 2 MB `exec-js` result prints 1.4 KB.
+- `get-text` reads a page for much less than its HTML: about 900 tokens against 6,500 for stripped HTML on the test page.
+- `run` takes several steps in one call, so a flow needs fewer round trips.
+
 ---
 
 ## Install
