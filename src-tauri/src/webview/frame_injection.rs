@@ -918,7 +918,7 @@ pub struct FrameDescribeResult {
 }
 
 /// Shared JS payload for discovering elements inside cross-origin iframes (used by CDP).
-pub const FRAME_DESCRIBE_JS: &str = "(function(){var els=Array.from(document.querySelectorAll('button,a[href],input,textarea,select')).filter(function(el){var r=el.getBoundingClientRect();return r.width>0&&r.height>0&&window.getComputedStyle(el).display!=='none'&&window.getComputedStyle(el).visibility!=='hidden'});var elements=els.map(function(el){var r=el.getBoundingClientRect();var t=(el.innerText||el.value||el.getAttribute('aria-label')||'').trim().substring(0,80);return{tag:el.tagName.toLowerCase(),text:t,x:r.left,y:r.top,w:r.width,h:r.height}});var fv={};document.querySelectorAll('input,textarea,select').forEach(function(el){if(el.value&&el.value.length>0){fv[el.name||el.id||el.getAttribute('aria-label')||el.tagName]=el.value.substring(0,200)}});return JSON.stringify({url:location.href,elements:elements,formValues:fv})})()";
+pub const FRAME_DESCRIBE_JS: &str = "(function(){var els=Array.from(document.querySelectorAll('button,a[href],input,textarea,select')).filter(function(el){var r=el.getBoundingClientRect();return r.width>0&&r.height>0&&window.getComputedStyle(el).display!=='none'&&window.getComputedStyle(el).visibility!=='hidden'});var elements=els.map(function(el){var r=el.getBoundingClientRect();var t=(el.innerText||(el.type==='password'&&el.value?'***':el.value)||el.getAttribute('aria-label')||'').trim().substring(0,80);return{tag:el.tagName.toLowerCase(),text:t,x:r.left,y:r.top,w:r.width,h:r.height}});var fv={};document.querySelectorAll('input:not([type=hidden]),textarea,select').forEach(function(el){if(el.value&&el.value.length>0){fv[el.name||el.id||el.getAttribute('aria-label')||el.tagName]=(el.type==='password'&&el.value?'***':el.value).substring(0,200)}});return JSON.stringify({url:location.href,elements:elements,formValues:fv})})()";
 
 // ============================================================================
 // macOS: WKScriptMessageHandler + WKUserScript native bridge.
@@ -1745,13 +1745,13 @@ mod macos_native {
                 });
                 var elements = els.map(function(el) {
                     var r = el.getBoundingClientRect();
-                    var t = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().substring(0, 80);
+                    var t = (el.innerText || (el.type==='password'&&el.value?'***':el.value) || el.getAttribute('aria-label') || '').trim().substring(0, 80);
                     return { tag: el.tagName.toLowerCase(), text: t, x: r.left, y: r.top, w: r.width, h: r.height };
                 });
                 var fv = {};
-                document.querySelectorAll('input,textarea,select').forEach(function(el) {
+                document.querySelectorAll('input:not([type=hidden]),textarea,select').forEach(function(el) {
                     if (el.value && el.value.length > 0) {
-                        fv[el.name || el.id || el.getAttribute('aria-label') || el.tagName] = el.value.substring(0, 200);
+                        fv[el.name || el.id || el.getAttribute('aria-label') || el.tagName] = (el.type==='password'&&el.value?'***':el.value).substring(0, 200);
                     }
                 });
                 window.webkit.messageHandlers.NS_PLACEHOLDERf.postMessage(
