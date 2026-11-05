@@ -35,8 +35,18 @@ fn enable_windows_tests() {
 #[cfg(not(target_os = "windows"))]
 fn enable_windows_tests() {}
 
+/// A debug `dalzzack.exe` overflowed the default 1 MB main-thread stack on every
+/// command, even `--version`, because unoptimized code keeps the whole parsed
+/// command line on the stack. macOS and Linux already give the main thread 8 MB.
+fn set_windows_stack_size() {
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo::rustc-link-arg-bins=/STACK:8388608");
+    }
+}
+
 fn main() {
     enable_windows_tests();
+    set_windows_stack_size();
 
     // tauri::generate_context!() requires the path in tauri.conf.json's
     // `frontendDist` to exist at compile time. We commit a stub at ../dist/
