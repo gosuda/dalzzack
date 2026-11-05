@@ -34,7 +34,8 @@ impl<W: Write> Write for ClippedLines<W> {
     }
 }
 
-fn delete_old_logs(dir: &Path, max_age: Duration) {
+/// Delete the files with this extension that are older than `max_age`.
+pub(crate) fn delete_old_files(dir: &Path, extension: &str, max_age: Duration) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -46,7 +47,8 @@ fn delete_old_logs(dir: &Path, max_age: Duration) {
             .and_then(|m| m.modified())
             .ok()
             .and_then(|modified| now.duration_since(modified).ok());
-        if path.extension().is_some_and(|e| e == "log") && age.is_some_and(|age| age > max_age) {
+        if path.extension().is_some_and(|e| e == extension) && age.is_some_and(|age| age > max_age)
+        {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -67,7 +69,7 @@ pub fn init_file_logging(instance_id: Option<&str>) -> Option<WorkerGuard> {
         eprintln!("[dalzzack] Failed to create log directory: {}", e);
         return None;
     }
-    delete_old_logs(&log_dir, LOG_RETENTION);
+    delete_old_files(&log_dir, "log", LOG_RETENTION);
 
     let now = chrono::Local::now();
     let log_filename = match instance_id {
@@ -174,7 +176,7 @@ mod tests {
             file.set_modified(modified).unwrap();
         }
 
-        delete_old_logs(&dir, LOG_RETENTION);
+        delete_old_files(&dir, "log", LOG_RETENTION);
 
         assert!(!dir.join("old.log").exists());
         assert!(dir.join("new.log").exists());

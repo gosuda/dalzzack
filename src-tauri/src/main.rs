@@ -49,6 +49,10 @@ struct Args {
     /// multi-KB JSON in `name`.
     #[arg(long, global = true)]
     full: bool,
+    /// Save output larger than N bytes to a file and print a summary. 0 turns this
+    /// off. The default is 16384 in a pipe, and no limit in a terminal or with --full.
+    #[arg(long, global = true, value_name = "N")]
+    max_output: Option<usize>,
 }
 
 #[derive(Subcommand)]
@@ -1372,13 +1376,17 @@ fn emit(
     tool: &str,
     args: &serde_json::Value,
 ) -> i32 {
-    use dalzzack_lib::cli::{brief::brief, output::show};
+    use dalzzack_lib::cli::{
+        brief::brief,
+        output::{limited, show},
+    };
     if !filter.is_active() {
-        if filter.full {
-            println!("{}", show(v, filter));
+        let text = if filter.full {
+            show(v, filter)
         } else {
-            println!("{}", show(&brief(tool, args, v), filter));
-        }
+            show(&brief(tool, args, v), filter)
+        };
+        println!("{}", limited(text, v, tool, args, filter));
         return 0;
     }
     let failed = v.get("status").and_then(|s| s.as_str()) == Some("failed");
@@ -1389,7 +1397,7 @@ fn emit(
     }
     match dalzzack_lib::cli::output::render(v, filter) {
         Ok(text) => {
-            println!("{text}");
+            println!("{}", limited(text, v, tool, args, filter));
             // On stderr, so stdout stays exactly what was asked for: a key
             // the output does not have, but a differently spelled one does
             // (`httpOnly` vs `http_only`), silently reads as null otherwise.
@@ -1460,6 +1468,7 @@ fn main() {
         Ok(a) => {
             let terminal = std::io::stdout().is_terminal();
             let full_env = std::env::var_os("DALZZACK_OUTPUT").is_some_and(|v| v == "full");
+            let full = a.full || terminal || full_env;
             full_flag = a.full;
             (
                 a.cmd,
@@ -1468,7 +1477,13 @@ fn main() {
                     jq: a.jq,
                     raw: a.raw,
                     pretty: a.pretty || terminal,
-                    full: a.full || terminal || full_env,
+                    full,
+                    max_output: match a.max_output {
+                        Some(0) => None,
+                        Some(limit) => Some(limit),
+                        None if full => None,
+                        None => Some(dalzzack_lib::cli::output::DEFAULT_MAX_OUTPUT),
+                    },
                 },
             )
         }
