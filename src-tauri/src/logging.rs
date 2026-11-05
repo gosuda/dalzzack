@@ -10,7 +10,8 @@ pub fn get_log_path() -> PathBuf {
     crate::state::data_dir().join("logs")
 }
 
-/// Initialize file logging (file + stderr simultaneous output).
+/// Initialize logging to a file. Nothing goes to stderr: a daemon has none, and
+/// an agent that runs `dalzzack run` would read every log line.
 /// Returns a WorkerGuard that flushes logs when dropped.
 pub fn init_file_logging(instance_id: Option<&str>) -> Option<WorkerGuard> {
     let log_dir = get_log_path();
@@ -36,10 +37,6 @@ pub fn init_file_logging(instance_id: Option<&str>) -> Option<WorkerGuard> {
         .with_line_number(true)
         .with_target(true);
 
-    let stderr_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_ansi(false);
-
     let env_filter = tracing_subscriber::EnvFilter::from_default_env()
         .add_directive("dalzzack=debug".parse().unwrap())
         .add_directive("dalzzack_lib=debug".parse().unwrap());
@@ -47,13 +44,10 @@ pub fn init_file_logging(instance_id: Option<&str>) -> Option<WorkerGuard> {
     let _ = tracing_subscriber::registry()
         .with(env_filter)
         .with(file_layer)
-        .with(stderr_layer)
         .try_init();
 
-    let log_path = log_dir.join(&log_filename);
-    eprintln!("[dalzzack] Log file: {:?}", log_path);
     tracing::info!("=== dalzzack Started ===");
-    tracing::info!("Log file: {:?}", log_path);
+    tracing::info!("Log file: {:?}", log_dir.join(&log_filename));
     tracing::info!("Instance ID: {:?}", instance_id);
 
     Some(guard)

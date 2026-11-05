@@ -140,39 +140,19 @@ pub fn run_steps(instance_id: &str, steps_path: &Path) {
                         );
                     }
                 }
-                tracing::info!("[Step {}/{}] {} {:?}", i + 1, steps.len(), step.tool, args);
+                // The tool name only: step arguments can hold form values.
+                tracing::info!("[Step {}/{}] {}", i + 1, steps.len(), step.tool);
 
                 let result = crate::tools::definitions::execute_tool(&step.tool, &args).await;
-
-                match result {
-                    Ok(output) => {
-                        let step_result = serde_json::json!({
-                            "step": i + 1,
-                            "tool": step.tool,
-                            "status": "completed",
-                            "result": output,
-                        });
-                        println!(
-                            "{}",
-                            serde_json::to_string(&step_result).unwrap_or_default()
-                        );
-                        results.push(step_result);
-                    }
-                    Err(e) => {
-                        let step_result = serde_json::json!({
-                            "step": i + 1,
-                            "tool": step.tool,
-                            "status": "failed",
-                            "error": e.to_string(),
-                        });
-                        println!(
-                            "{}",
-                            serde_json::to_string(&step_result).unwrap_or_default()
-                        );
-                        results.push(step_result);
-                        failed = true;
-                        break; // Stop on first failure
-                    }
+                let (step_result, step_failed) = step_report(i + 1, &step.tool, result);
+                println!(
+                    "{}",
+                    serde_json::to_string(&step_result).unwrap_or_default()
+                );
+                results.push(step_result);
+                if step_failed {
+                    failed = true;
+                    break; // Stop on first failure
                 }
             }
 
@@ -194,6 +174,36 @@ pub fn run_steps(instance_id: &str, steps_path: &Path) {
         instance_id: Some(id_for_gui),
         ..Default::default()
     });
+}
+
+/// The output line of one step, and whether the run must stop. A tool reports
+/// its own failure inside `Ok`, as `status: "failed"`.
+fn step_report(
+    step: usize,
+    tool: &str,
+    result: anyhow::Result<serde_json::Value>,
+) -> (serde_json::Value, bool) {
+    match result {
+        Ok(output) => {
+            let failed = output["status"] == "failed";
+            let report = serde_json::json!({
+                "step": step,
+                "tool": tool,
+                "status": if failed { "failed" } else { "completed" },
+                "result": output,
+            });
+            (report, failed)
+        }
+        Err(e) => {
+            let report = serde_json::json!({
+                "step": step,
+                "tool": tool,
+                "status": "failed",
+                "error": e.to_string(),
+            });
+            (report, true)
+        }
+    }
 }
 
 /// Expand $ENV_VAR and ${ENV_VAR} references in a string using environment variables.
@@ -251,6 +261,24 @@ fn expand_env_vars(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failure_inside_a_tool_result_stops_the_run() {
+        let failed = serde_json::json!({ "status": "failed", "error": "ELEMENT_NOT_FOUND" });
+        let (report, stop) = step_report(2, "click_element", Ok(failed));
+        assert!(stop);
+        assert_eq!(report["status"], "failed");
+        assert_eq!(report["result"]["error"], "ELEMENT_NOT_FOUND");
+
+        let done = serde_json::json!({ "status": "completed" });
+        let (report, stop) = step_report(3, "get_html", Ok(done));
+        assert!(!stop);
+        assert_eq!(report["status"], "completed");
+
+        let (report, stop) = step_report(4, "navigate", Err(anyhow::anyhow!("boom")));
+        assert!(stop);
+        assert_eq!(report["error"], "boom");
+    }
 
     #[test]
     fn test_expand_env_vars() {
