@@ -1842,7 +1842,10 @@ fn command_step(line: &serde_json::Value) -> Result<dalzzack_lib::cli::Step, Str
     ) {
         return Err("only commands that act on a page can be a step".to_string());
     }
-    let (_, tool, args) = cli_to_tool_call(parsed.cmd);
+    let (id, tool, args) = cli_to_tool_call(parsed.cmd);
+    if !id.is_empty() {
+        return Err("a step cannot name an instance: `run --id` chooses it".to_string());
+    }
     Ok(dalzzack_lib::cli::Step {
         tool,
         args: Some(args),
@@ -2941,6 +2944,7 @@ mod tests {
                 json!(["run", "--steps", "x.json"]),
                 json!(["guide"]),
                 json!(["upgrade"]),
+                json!(["get-url", "-i", "other"]),
                 json!(["no-such-command"]),
                 json!(["click", 5]),
                 json!("click"),
