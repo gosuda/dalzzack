@@ -42,6 +42,13 @@ struct Args {
     /// Print indented JSON. This is the default in a terminal; a pipe gets compact JSON.
     #[arg(long, global = true)]
     pretty: bool,
+    /// Print the complete result. This is the default in a terminal; a pipe gets a
+    /// short form, unless DALZZACK_OUTPUT=full is set. On `get-frames`, also print
+    /// complete `name` attributes: by default they are cut at 200 chars
+    /// (`name_len`/`name_truncated` mark the cut), because SafeFrame ad slots carry
+    /// multi-KB JSON in `name`.
+    #[arg(long, global = true)]
+    full: bool,
 }
 
 #[derive(Subcommand)]
@@ -838,11 +845,6 @@ enum Cli {
         /// Instance ID
         #[arg(long, short, default_value = "")]
         id: String,
-        /// Return complete `name` attributes. By default names are truncated to
-        /// 200 chars (`name_len`/`name_truncated` mark the cut) — SafeFrame ad
-        /// slots carry multi-KB JSON in `name`.
-        #[arg(long)]
-        full: bool,
     },
 
     /// Get iframe HTML content (supports cross-origin via CDP)
@@ -1363,9 +1365,20 @@ fn parse_engine_or_exit(raw: &str) -> dalzzack_lib::engine::Engine {
 /// `--field result` on a failure would otherwise print `null` with exit 0,
 /// which reads as "the script returned null". `--jq` sees everything — it is
 /// the tool for handling failures yourself.
-fn emit(v: &serde_json::Value, filter: &dalzzack_lib::cli::output::OutputFilter) -> i32 {
+/// Print a result. `tool` and `args` say which short form applies.
+fn emit(
+    v: &serde_json::Value,
+    filter: &dalzzack_lib::cli::output::OutputFilter,
+    tool: &str,
+    args: &serde_json::Value,
+) -> i32 {
+    use dalzzack_lib::cli::{brief::brief, output::show};
     if !filter.is_active() {
-        println!("{}", dalzzack_lib::cli::output::show(v, filter));
+        if filter.full {
+            println!("{}", show(v, filter));
+        } else {
+            println!("{}", show(&brief(tool, args, v), filter));
+        }
         return 0;
     }
     let failed = v.get("status").and_then(|s| s.as_str()) == Some("failed");
@@ -1410,7 +1423,7 @@ fn emit_result(
     filter: &dalzzack_lib::cli::output::OutputFilter,
 ) -> ! {
     match r {
-        Ok(v) => std::process::exit(emit(&v, filter)),
+        Ok(v) => std::process::exit(emit(&v, filter, "", &serde_json::Value::Null)),
         Err(e) => {
             // Unfiltered, failures keep their long-standing place on stderr.
             // A filter promises "the whole failure, on stdout, exit 1" — a
@@ -1426,6 +1439,7 @@ fn emit_result(
 }
 
 fn main() {
+    let full_flag;
     // Usage errors must reach stdout too: clap prints them to stderr and a
     // runner with `2>/dev/null` sees a successful-looking empty result.
     let (cli, filter) = match Args::try_parse() {
@@ -1443,15 +1457,21 @@ fn main() {
             );
             std::process::exit(2);
         }
-        Ok(a) => (
-            a.cmd,
-            dalzzack_lib::cli::output::OutputFilter {
-                fields: a.field,
-                jq: a.jq,
-                raw: a.raw,
-                pretty: a.pretty || std::io::stdout().is_terminal(),
-            },
-        ),
+        Ok(a) => {
+            let terminal = std::io::stdout().is_terminal();
+            let full_env = std::env::var_os("DALZZACK_OUTPUT").is_some_and(|v| v == "full");
+            full_flag = a.full;
+            (
+                a.cmd,
+                dalzzack_lib::cli::output::OutputFilter {
+                    fields: a.field,
+                    jq: a.jq,
+                    raw: a.raw,
+                    pretty: a.pretty || terminal,
+                    full: a.full || terminal || full_env,
+                },
+            )
+        }
         Err(e) => {
             use clap::error::ErrorKind;
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
@@ -1574,7 +1594,8 @@ fn main() {
             );
         }
         Cli::List => {
-            std::process::exit(emit(&dalzzack_lib::daemon::list_instances_json(), &filter));
+            let instances = dalzzack_lib::daemon::list_instances_json();
+            std::process::exit(emit(&instances, &filter, "list", &serde_json::Value::Null));
         }
         Cli::Daemon {
             id,
@@ -1637,7 +1658,7 @@ fn main() {
         Cli::Tools => {
             let defs = dalzzack_lib::tools::definitions::get_tool_definitions();
             let v = serde_json::to_value(&defs).unwrap_or_else(|_| serde_json::json!([]));
-            std::process::exit(emit(&v, &filter));
+            std::process::exit(emit(&v, &filter, "", &serde_json::Value::Null));
         }
         Cli::Upgrade {
             path,
@@ -1650,10 +1671,13 @@ fn main() {
         }
         // All tool commands → send to daemon via socket
         cmd => {
-            let (id, tool_name, args) = cli_to_tool_call(cmd);
+            let (id, tool_name, mut args) = cli_to_tool_call(cmd);
+            if full_flag && tool_name == "get_frame_list" {
+                args["full"] = serde_json::json!(true);
+            }
             let id = resolve_instance_id(id);
             let pathconv = shell_pathconv_suspects(&args);
-            let result = dalzzack_lib::daemon::send_command(&id, &tool_name, args);
+            let result = dalzzack_lib::daemon::send_command(&id, &tool_name, args.clone());
             match result {
                 Ok(mut output) => {
                     // Git-Bash (MSYS2) rewrites any argv starting with `/` into a
@@ -1675,7 +1699,7 @@ fn main() {
                             );
                         }
                     }
-                    std::process::exit(emit(&output, &filter));
+                    std::process::exit(emit(&output, &filter, &tool_name, &args));
                 }
                 Err(e) => {
                     eprintln!(
@@ -1972,11 +1996,7 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
             "inject_clear".into(),
             serde_json::json!({ "name": name }),
         ),
-        Cli::GetFrames { id, full } => (
-            id,
-            "get_frame_list".into(),
-            serde_json::json!({ "full": full }),
-        ),
+        Cli::GetFrames { id } => (id, "get_frame_list".into(), serde_json::json!({})),
         Cli::GetFrameHtml {
             id,
             selector,

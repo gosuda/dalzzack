@@ -65,6 +65,8 @@ function run(args, { expectFail = false, timeout = TIMEOUT_MS } = {}) {
       timeout,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
+      // These tests read whole results, not the short form that a pipe gets.
+      env: { ...process.env, DALZZACK_OUTPUT: "full" },
     });
     return { ok: true, output: output.trim(), parsed: tryParse(output) };
   } catch (e) {

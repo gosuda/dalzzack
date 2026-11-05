@@ -7,6 +7,9 @@
 
 set -euo pipefail
 
+# This script reads whole results, not the short form that a pipe gets.
+export DALZZACK_OUTPUT=full
+
 ID="smoke-$$"
 WORKDIR=$(mktemp -d -t dalzzack-smoke-XXXXXX)
 trap 'dalzzack stop --id "$ID" >/dev/null 2>&1 || true; rm -rf "$WORKDIR"' EXIT

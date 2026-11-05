@@ -22,6 +22,8 @@ pub struct OutputFilter {
     /// Print indented JSON. Every other byte of indent is a token nobody reads
     /// when the output goes to an agent.
     pub pretty: bool,
+    /// Print the complete result and not its short form.
+    pub full: bool,
 }
 
 impl OutputFilter {
