@@ -626,8 +626,8 @@ const tests = {
       assert(rdry.dry_run === true && rdry.would_be_refused === true, `reset dry run: ${JSON.stringify(rdry)}`);
 
       // --ttl: the daemon stops itself, private folder and all.
-      const t = run(`start --id ${T} --private-profile --ttl 6s`).parsed;
-      assert(t.ttl_s === 6 && t.expires_at_ms > Date.now(), `ttl start: ${JSON.stringify(t)}`);
+      const t = run(`start --id ${T} --private-profile --ttl 12s`).parsed;
+      assert(t.ttl_s === 12 && t.expires_at_ms > Date.now(), `ttl start: ${JSON.stringify(t)}`);
       const tdir = t.profile && t.profile.path;
       let gone = false;
       for (let i = 0; i < 40 && !gone; i++) {
