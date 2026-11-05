@@ -1,6 +1,6 @@
 //! Global application state and helper accessors.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, WebviewWindow};
@@ -127,6 +127,23 @@ pub fn data_dir() -> PathBuf {
         .join("dalzzack")
 }
 
+/// The absolute form of `path`, for printing. On Windows, `canonicalize` gives a
+/// `\\?\` path, which many programs cannot open, Git Bash among them.
+pub fn printable_path(path: &Path) -> String {
+    let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    without_verbatim_prefix(&absolute.to_string_lossy())
+}
+
+fn without_verbatim_prefix(path: &str) -> String {
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(share) => format!(r"\\{share}"),
+            None => rest.to_string(),
+        },
+        None => path.to_string(),
+    }
+}
+
 /// The folder that holds one sub-folder of files per instance.
 pub fn get_sites_path() -> PathBuf {
     data_dir().join("sites")
@@ -134,6 +151,14 @@ pub fn get_sites_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn printed_paths_have_no_verbatim_prefix() {
+        let plain = super::without_verbatim_prefix;
+        assert_eq!(plain(r"\\?\D:\a\b.png"), r"D:\a\b.png");
+        assert_eq!(plain(r"\\?\UNC\host\share\b.png"), r"\\host\share\b.png");
+        assert_eq!(plain("/Users/a/b.png"), "/Users/a/b.png");
+    }
+
     #[test]
     fn files_never_go_next_to_the_binary() {
         let exe = std::env::current_exe().unwrap();

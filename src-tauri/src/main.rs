@@ -3124,13 +3124,12 @@ fn install_docs(target: &str) {
             let path = std::path::PathBuf::from("AGENTS.md");
             eprintln!("Installing for Codex (current project)...");
             inject_docs(&path, "AGENTS.md");
-            let abs = path.canonicalize().unwrap_or(path.clone());
             println!(
                 "{}",
                 serde_json::json!({
                     "status": "completed",
                     "target": "codex-project",
-                    "file": abs.display().to_string(),
+                    "file": dalzzack_lib::state::printable_path(&path),
                     "message": "dalzzack docs injected into ./AGENTS.md (current project)"
                 })
             );

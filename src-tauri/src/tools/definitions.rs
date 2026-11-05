@@ -2667,15 +2667,9 @@ async fn tool_screenshot(args: &Value) -> Result<Value> {
             let size = metadata.map(|m| m.len()).unwrap_or(0);
             let current_url = webview_get_url().await.unwrap_or_default();
 
-            let absolute_path = file_path
-                .canonicalize()
-                .unwrap_or_else(|_| file_path.clone())
-                .to_string_lossy()
-                .to_string();
-
             Ok(serde_json::json!({
                 "status": "completed",
-                "file": absolute_path,
+                "file": crate::state::printable_path(&file_path),
                 "size": size,
                 "current_url": current_url,
                 "selector": selector
@@ -5369,19 +5363,12 @@ async fn tool_save_image(args: &Value) -> Result<Value> {
                             tokio::fs::create_dir_all(parent).await.ok();
                         }
                         match tokio::fs::write(path, &bytes).await {
-                            Ok(()) => {
-                                let absolute = path
-                                    .canonicalize()
-                                    .unwrap_or_else(|_| path.to_path_buf())
-                                    .to_string_lossy()
-                                    .to_string();
-                                Ok(serde_json::json!({
-                                    "status": "completed",
-                                    "file": absolute,
-                                    "size": bytes.len(),
-                                    "selector": selector
-                                }))
-                            }
+                            Ok(()) => Ok(serde_json::json!({
+                                "status": "completed",
+                                "file": crate::state::printable_path(path),
+                                "size": bytes.len(),
+                                "selector": selector
+                            })),
                             Err(e) => Ok(serde_json::json!({
                                 "status": "failed",
                                 "error": "WRITE_ERROR",
@@ -5591,12 +5578,6 @@ async fn tool_describe(args: &Value) -> Result<Value> {
     // Step 4: Build response — merge main frame + cross-origin elements
     let metadata = tokio::fs::metadata(&file_path).await;
     let size = metadata.map(|m| m.len()).unwrap_or(0);
-    let absolute_path = file_path
-        .canonicalize()
-        .unwrap_or_else(|_| file_path.clone())
-        .to_string_lossy()
-        .to_string();
-
     let capture_ok = capture_result.is_ok();
 
     let mut parsed: serde_json::Value = match collect_result {
@@ -5627,7 +5608,7 @@ async fn tool_describe(args: &Value) -> Result<Value> {
 
     Ok(serde_json::json!({
         "status": if capture_ok { "completed" } else { "partial" },
-        "file": absolute_path,
+        "file": crate::state::printable_path(&file_path),
         "size": size,
         "url": parsed["url"],
         "title": parsed["title"],
