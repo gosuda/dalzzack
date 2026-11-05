@@ -9,6 +9,7 @@
 // A GUI-only build would need it; we use the console subsystem instead.
 
 use clap::{Parser, Subcommand};
+use dalzzack_lib::state::home_dir;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -1156,26 +1157,35 @@ enum Cli {
         names: bool,
     },
 
-    /// Upgrade dalzzack in place via `cargo install`.
-    /// Stops any running daemons first so they pick up the new code.
-    /// Default source is the repository URL baked into the binary at build time.
-    /// Needs cargo; without it, prints the download link of the prebuilt binary.
+    /// Check the latest release and replace this binary if it is older.
+    /// Stops running daemons so they pick up the new version, then refreshes the
+    /// installed guides. --path, --git, --rev, and --no-locked build from source
+    /// with cargo instead.
+    #[command(visible_alias = "update")]
     Upgrade {
-        /// Use `cargo install --path <PATH>` instead of `--git <URL>`.
-        /// Handy when you're hacking on the repo locally — point this at the
-        /// repo root or `src-tauri/`.
+        /// Print the current and latest versions. Change nothing.
+        #[arg(long, conflicts_with_all = ["force", "tag", "path", "git", "rev", "no_locked"])]
+        check: bool,
+        /// Install the release even if this version is the same.
+        #[arg(long, conflicts_with_all = ["path", "git", "rev", "no_locked"])]
+        force: bool,
+        /// Install this release tag and not the latest: a release candidate or a rollback.
+        #[arg(long, conflicts_with_all = ["path", "git", "rev", "no_locked"])]
+        tag: Option<String>,
+        /// Build from this folder with `cargo install --path`.
+        /// Point this at the repo root or `src-tauri/`.
         #[arg(long)]
         path: Option<PathBuf>,
-        /// Override the git URL (defaults to the repository URL compiled into the binary).
+        /// Build from this repository with `cargo install --git`.
         #[arg(long)]
         git: Option<String>,
-        /// Git revision (branch / tag / sha) to install from. Only used with --git or the baked-in URL.
+        /// Git revision (branch / tag / sha) to build. Uses --git or this project's repository.
         #[arg(long)]
         rev: Option<String>,
         /// Don't try to stop running daemons — fail if any are alive.
         #[arg(long)]
         keep_daemons: bool,
-        /// Skip the `--locked` flag passed to cargo install.
+        /// Build from source without the `--locked` flag of cargo install.
         #[arg(long)]
         no_locked: bool,
     },
@@ -1540,14 +1550,14 @@ fn main() {
 
     // A previous `upgrade` may have left its own (then-running) image behind
     // as `dalzzack.exe.old`; this is the first moment it can be deleted.
-    sweep_moved_aside();
+    dalzzack_lib::upgrade::sweep_moved_aside();
 
     // These print progress or several documents; a filter has nothing single
     // to apply to, and silently ignoring it would be worse than saying so.
     if filter.is_active()
         && matches!(
             cli,
-            Cli::Run { .. } | Cli::Install { .. } | Cli::Upgrade { .. } | Cli::Daemon { .. }
+            Cli::Run { .. } | Cli::Install { .. } | Cli::Daemon { .. }
         )
     {
         println!(
@@ -1556,7 +1566,7 @@ fn main() {
                 "status": "failed",
                 "error": "USAGE",
                 "message": "--field/--jq apply to commands that print one JSON document; run, \
-                            install, upgrade and daemon print several",
+                            install and daemon print several",
             })
         );
         std::process::exit(2);
@@ -1717,13 +1727,30 @@ fn main() {
             std::process::exit(emit(&v, &filter, "", &serde_json::Value::Null));
         }
         Cli::Upgrade {
+            check,
+            force,
+            tag,
             path,
             git,
             rev,
             keep_daemons,
             no_locked,
         } => {
-            upgrade(path, git, rev, keep_daemons, no_locked);
+            let (report, code) = match dalzzack_lib::upgrade::run(dalzzack_lib::upgrade::Options {
+                check,
+                force,
+                tag,
+                keep_daemons,
+                path,
+                git,
+                rev,
+                no_locked,
+            }) {
+                Ok(report) => (report, 0),
+                Err(report) => (report, 1),
+            };
+            emit(&report, &filter, "", &serde_json::Value::Null);
+            std::process::exit(code);
         }
         // All tool commands → send to daemon via socket
         cmd => {
@@ -2930,241 +2957,6 @@ fn refresh_docs() {
     );
 }
 
-/// Compile-time repository URL (from Cargo.toml `repository = "..."`).
-/// Empty string when unset; `upgrade` falls back to an error in that case.
-const BAKED_REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
-
-/// The plain-binary archive that `release.yml` attaches for this platform.
-#[cfg(target_os = "macos")]
-const RELEASE_ASSET: Option<&str> = Some("dalzzack-macos-universal.tar.gz");
-#[cfg(target_os = "windows")]
-const RELEASE_ASSET: Option<&str> = Some("dalzzack-windows-x64.zip");
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const RELEASE_ASSET: Option<&str> = None;
-
-/// `<repo>/releases/latest/download/<asset>`: the newest release's archive,
-/// whose name never changes. `None` without a repository URL or without a
-/// release build for this platform.
-fn release_download_url(repo: &str, asset: Option<&str>) -> Option<String> {
-    let repo = repo.trim_end_matches('/');
-    match asset {
-        Some(asset) if !repo.is_empty() => Some(format!("{repo}/releases/latest/download/{asset}")),
-        _ => None,
-    }
-}
-
-fn cargo_on_path() -> bool {
-    std::process::Command::new("cargo")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-/// Same file, also when one path goes through a symlink or differs in case
-/// on a case-insensitive file system.
-fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
-}
-
-/// `dalzzack upgrade` — reinstall this binary via cargo, stopping any
-/// running daemons first so they pick up the new code on next `start`.
-fn upgrade(
-    path: Option<PathBuf>,
-    git_override: Option<String>,
-    rev: Option<String>,
-    keep_daemons: bool,
-    no_locked: bool,
-) {
-    // 0. A binary installed from a release archive can run on a machine with
-    //    no Rust. Point it at the archive before any daemon is stopped.
-    if !cargo_on_path() {
-        println!(
-            "{}",
-            serde_json::json!({
-                "status": "failed",
-                "error": "cargo_not_found",
-                "message": "upgrade builds dalzzack from source with cargo, and cargo is not on PATH.",
-                "download_url": release_download_url(BAKED_REPO_URL, RELEASE_ASSET),
-                "current_exe": std::env::current_exe().ok().map(|p| p.display().to_string()),
-                "hint": "Download the archive, stop the running daemons (`dalzzack list`, then \
-                         `dalzzack stop --id <id>`), and replace current_exe with the binary \
-                         inside. Or install Rust from https://rustup.rs and run upgrade again.",
-            })
-        );
-        std::process::exit(1);
-    }
-    // Captured before step 3 renames the running image on Windows.
-    let running_from = std::env::current_exe().ok();
-
-    // 1. Discover and stop running daemons (unless --keep-daemons).
-    let alive = list_running_instance_ids();
-    if !alive.is_empty() {
-        if keep_daemons {
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "status": "failed",
-                    "error": "daemons_running",
-                    "ids": alive,
-                    "message": "Refusing to upgrade with daemons running. Stop them or omit --keep-daemons.",
-                })
-            );
-            std::process::exit(1);
-        }
-        eprintln!(
-            "[upgrade] stopping {} running daemon(s): {:?}",
-            alive.len(),
-            alive
-        );
-        for id in &alive {
-            stop_or_kill(id);
-        }
-    }
-
-    // 2. Pick source.
-    let mut cmd = std::process::Command::new("cargo");
-    cmd.arg("install");
-    if !no_locked {
-        cmd.arg("--locked");
-    }
-    cmd.arg("--force");
-
-    if let Some(p) = path {
-        let p_str = p.to_string_lossy().to_string();
-        eprintln!("[upgrade] cargo install --path {} --force", p_str);
-        cmd.arg("--path").arg(p);
-    } else {
-        let url = git_override.unwrap_or_else(|| BAKED_REPO_URL.to_string());
-        if url.is_empty() {
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "status": "failed",
-                    "error": "no_source",
-                    "message": "No repository URL baked in. Pass --git <URL> or --path <DIR>.",
-                })
-            );
-            std::process::exit(1);
-        }
-        eprintln!("[upgrade] cargo install --git {} --force", url);
-        cmd.arg("--git").arg(&url);
-        if let Some(r) = rev {
-            cmd.arg("--rev").arg(r);
-        }
-    }
-
-    // 3. Windows: get the running image out of cargo's way.
-    //
-    // Windows refuses to overwrite or delete an executable that is currently
-    // running — and the process running `dalzzack upgrade` IS the installed
-    // `dalzzack.exe`, so `cargo install` built fine and then failed on the
-    // final move with os error 5, with no daemon left to blame. A running image
-    // may be *renamed*, though: move it aside to `.old`, let cargo drop the new
-    // file into place, and sweep the `.old` on the next start (the rustup /
-    // cargo-update pattern).
-    let install_target = cargo_install_target();
-    let moved_aside = moved_aside_path(&install_target);
-    #[cfg(target_os = "windows")]
-    if install_target.exists() {
-        let _ = std::fs::remove_file(&moved_aside);
-        match std::fs::rename(&install_target, &moved_aside) {
-            Ok(()) => eprintln!(
-                "[upgrade] moved running image aside: {} -> {}",
-                install_target.display(),
-                moved_aside.display()
-            ),
-            Err(e) => eprintln!(
-                "[upgrade] could not move {} aside ({e}); cargo may fail to replace it",
-                install_target.display()
-            ),
-        }
-    }
-
-    // 4. Run cargo install.
-    let status = match cmd.status() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "status": "failed",
-                    "error": "cargo_spawn_failed",
-                    "message": format!("Failed to run cargo: {}. Is cargo on PATH?", e),
-                })
-            );
-            std::process::exit(1);
-        }
-    };
-
-    if !status.success() {
-        // Put the previous binary back if cargo never produced a new one, so a
-        // failed upgrade leaves a working `dalzzack` rather than none.
-        let restored = if moved_aside.exists() && !install_target.exists() {
-            std::fs::rename(&moved_aside, &install_target).is_ok()
-        } else {
-            false
-        };
-        println!(
-            "{}",
-            serde_json::json!({
-                "status": "failed",
-                "error": "cargo_install_failed",
-                "exit_code": status.code(),
-                "install_target": install_target.display().to_string(),
-                "previous_binary_restored": restored,
-                "hint": "Read cargo's own output above for the failing step. If it is the final \
-                         move onto the install target with 'os error 5', something still has that \
-                         file open — a daemon started from THIS binary (`dalzzack list`), or an \
-                         antivirus scan; the running upgrade process itself is moved aside first \
-                         and is not the cause.",
-            })
-        );
-        std::process::exit(1);
-    }
-    // The old image is still mapped by this very process, so deleting it here
-    // fails on Windows — it is swept on the next start (`sweep_moved_aside`).
-    let _ = std::fs::remove_file(&moved_aside);
-
-    // 5. macOS: ad-hoc re-codesign the new binary so Gatekeeper doesn't grump.
-    //    The new binary is the one cargo installed, which is not this process's
-    //    image when dalzzack was installed from a release archive.
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("codesign")
-            .args(["--force", "--sign", "-"])
-            .arg(&install_target)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-
-    let mut out = serde_json::json!({
-        "status": "upgraded",
-        "stopped_daemons": alive,
-        "installed_to": install_target.display().to_string(),
-    });
-    // A binary from a release archive lives outside cargo's bin directory, so
-    // the new build did not replace it and the old copy may still win on PATH.
-    if let Some(exe) = running_from.filter(|exe| !same_path(exe, &install_target)) {
-        out["note"] = format!(
-            "This command ran from {}, which cargo did not replace. Delete that copy, \
-             or put {} before it on PATH.",
-            exe.display(),
-            install_target
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default()
-        )
-        .into();
-    }
-    println!("{out}");
-}
-
 /// Option values that start with `/` are exactly what Git-Bash (MSYS2) rewrites
 /// into a Windows path before the program ever sees them. Only the options
 /// whose values are URL fragments — never real paths — are checked.
@@ -3191,98 +2983,6 @@ fn looks_shell_path_converted(v: &str) -> bool {
         && (b[2] == b'/' || b[2] == b'\\');
     has_drive
         && (v.contains("/Git/") || v.contains("\\Git\\") || v.to_ascii_lowercase().contains("msys"))
-}
-
-/// Where `cargo install` puts the binary, in cargo's own precedence:
-/// `$CARGO_INSTALL_ROOT/bin`, else `$CARGO_HOME/bin`, else `~/.cargo/bin`.
-fn cargo_install_target() -> PathBuf {
-    let root = std::env::var_os("CARGO_INSTALL_ROOT")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("CARGO_HOME").map(PathBuf::from))
-        .unwrap_or_else(|| home_dir().join(".cargo"));
-    root.join("bin")
-        .join(format!("dalzzack{}", std::env::consts::EXE_SUFFIX))
-}
-
-/// The name a running image is renamed to while cargo replaces it.
-fn moved_aside_path(target: &std::path::Path) -> PathBuf {
-    let mut s = target.as_os_str().to_owned();
-    s.push(".old");
-    PathBuf::from(s)
-}
-
-/// Delete the `.old` image a previous `upgrade` left behind. The upgrade
-/// itself cannot: on Windows that file was its own running image.
-fn sweep_moved_aside() {
-    // Both the configured install target and wherever this binary actually
-    // lives — they differ when the exe was copied or a CARGO_INSTALL_ROOT
-    // changed between the upgrade and now.
-    let mut candidates = vec![moved_aside_path(&cargo_install_target())];
-    if let Ok(exe) = std::env::current_exe() {
-        candidates.push(moved_aside_path(&exe));
-    }
-    candidates.dedup();
-    for old in candidates {
-        if old.exists() {
-            match std::fs::remove_file(&old) {
-                Ok(()) => tracing::debug!("[upgrade] swept {}", old.display()),
-                // Still mapped by another process (an older daemon, say); next time.
-                Err(e) => tracing::debug!("[upgrade] could not sweep {}: {e}", old.display()),
-            }
-        }
-    }
-}
-
-/// Scan the temp dir for `dalzzack-*.port` files and return the instance IDs.
-/// Doesn't ping — `stop_or_kill` will figure out whether a graceful shutdown works.
-fn list_running_instance_ids() -> Vec<String> {
-    let tmp_dir = std::env::temp_dir();
-    let mut ids = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(rest) = name.strip_prefix("dalzzack-") {
-                if let Some(id) = rest.strip_suffix(".port") {
-                    ids.push(id.to_string());
-                }
-            }
-        }
-    }
-    ids.sort();
-    ids
-}
-
-/// Try graceful shutdown; if it errors out (hung daemon), force-kill by PID.
-/// Both calls are best-effort — we don't want a stuck daemon to block the upgrade.
-fn stop_or_kill(id: &str) {
-    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("dalzzack"));
-    let stop = std::process::Command::new(&exe)
-        .args(["stop", "--id", id])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    if matches!(stop, Ok(s) if s.success()) {
-        eprintln!("[upgrade]   stopped {}", id);
-        return;
-    }
-    eprintln!("[upgrade]   stop failed for {} — force-killing", id);
-    let _ = std::process::Command::new(&exe)
-        .args(["kill", "--id", id])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
-fn home_dir() -> std::path::PathBuf {
-    // Windows: USERPROFILE (e.g. C:\Users\name)
-    // macOS/Linux: HOME (e.g. /Users/name)
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            eprintln!("Error: Could not determine home directory (HOME / USERPROFILE not set)");
-            std::process::exit(1);
-        })
 }
 
 /// Where Codex keeps its global files: `$CODEX_HOME`, else `~/.codex`.
@@ -3446,31 +3146,6 @@ mod tests {
     }
 
     #[test]
-    fn release_download_url_points_at_the_latest_fixed_name_asset() {
-        assert_eq!(
-            release_download_url(
-                "https://github.com/gosuda/dalzzack/",
-                Some("dalzzack-windows-x64.zip")
-            )
-            .as_deref(),
-            Some("https://github.com/gosuda/dalzzack/releases/latest/download/dalzzack-windows-x64.zip")
-        );
-        // No repository baked in, or no release build for this platform.
-        assert_eq!(
-            release_download_url("", Some("dalzzack-windows-x64.zip")),
-            None
-        );
-        assert_eq!(
-            release_download_url("https://github.com/gosuda/dalzzack", None),
-            None
-        );
-        // The baked-in values on the two release platforms.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        assert!(release_download_url(BAKED_REPO_URL, RELEASE_ASSET)
-            .is_some_and(|u| u.starts_with("https://github.com/gosuda/dalzzack/releases/latest/")));
-    }
-
-    #[test]
     fn git_bash_path_conversion_is_recognised_and_plain_values_are_not() {
         // What MSYS2 makes of `--to "/zp/p/"`.
         assert!(looks_shell_path_converted("C:/Program Files/Git/zp/p/"));
@@ -3496,11 +3171,5 @@ mod tests {
             hits,
             vec![r#"--to="C:/Program Files/Git/zp/p/""#.to_string()]
         );
-    }
-
-    #[test]
-    fn moved_aside_name_appends_old_to_the_full_filename() {
-        let p = moved_aside_path(std::path::Path::new("C:/x/bin/dalzzack.exe"));
-        assert!(p.to_string_lossy().ends_with("dalzzack.exe.old"));
     }
 }

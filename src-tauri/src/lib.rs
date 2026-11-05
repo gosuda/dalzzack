@@ -46,6 +46,8 @@ pub mod tools;
 pub mod types;
 /// User-Agent resolution and engine-version detection.
 pub mod ua;
+/// `upgrade` — replace the binary with the latest release.
+pub mod upgrade;
 pub mod webview;
 
 // Re-export public API for backward compatibility

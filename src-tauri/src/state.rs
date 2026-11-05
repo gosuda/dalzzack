@@ -116,6 +116,17 @@ pub async fn wait_for_main_window(budget: std::time::Duration) -> Option<Webview
     }
 }
 
+/// The user's home folder: `HOME`, else `USERPROFILE`.
+pub fn home_dir() -> PathBuf {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            eprintln!("Error: Could not determine home directory (HOME / USERPROFILE not set)");
+            std::process::exit(1);
+        })
+}
+
 /// Where dalzzack keeps what it writes: screenshots and logs.
 ///
 /// Per-user, and never next to the binary: the install folder may not be

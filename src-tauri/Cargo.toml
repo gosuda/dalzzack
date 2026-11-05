@@ -42,6 +42,8 @@ chrono = "0.4.45"
 base64 = "0.23.1"
 lazy_static = "1.5.1"
 reqwest = { version = "0.13.5", features = ["cookies", "json"] }
+semver = "1.0.28"
+sha2 = "0.10.9"
 url = "2.5.8"
 xcap = "0.9.8"
 image = "0.25.10"
