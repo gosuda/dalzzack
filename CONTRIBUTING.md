@@ -93,6 +93,6 @@ Use GitHub Issues. Include:
 - OS and OS version
 - Steps to reproduce, including the exact CLI command
 - What you expected vs what happened
-- Daemon log if relevant (logs are at `~/.cargo/bin/logs/dalzzack_<id>_<date>.log` by default on a `npm run deploy` install)
+- Daemon log if relevant (logs are at `%LOCALAPPDATA%\dalzzack\logs\dalzzack_<id>_<date>.log` on Windows and `~/Library/Application Support/dalzzack/logs/` on macOS)
 
 Security issues go to the channel listed in [SECURITY.md](SECURITY.md) instead.

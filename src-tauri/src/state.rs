@@ -116,17 +116,32 @@ pub async fn wait_for_main_window(budget: std::time::Duration) -> Option<Webview
     }
 }
 
-/// Return the sites directory path (relative to the executable)
+/// Where dalzzack keeps what it writes: screenshots and logs.
+///
+/// Per-user, and never next to the binary: the install folder may not be
+/// writable (`C:\Windows\System32`, `/usr/local/bin`), and `navigate` failed
+/// there with a bare `os error 5`.
+pub fn data_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("dalzzack")
+}
+
+/// The folder that holds one sub-folder of files per instance.
 pub fn get_sites_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join("sites")
+    data_dir().join("sites")
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn files_never_go_next_to_the_binary() {
+        let exe = std::env::current_exe().unwrap();
+        let exe_dir = exe.parent().unwrap();
+        assert!(!super::get_sites_path().starts_with(exe_dir));
+        assert!(super::get_sites_path().starts_with(super::data_dir()));
+    }
+
     #[test]
     fn csp_is_never_reported_as_bypassed_off_windows() {
         // `Page.setBypassCSP` needs CDP, which only WebView2 has. Claiming a

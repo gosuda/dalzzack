@@ -12,7 +12,7 @@ use crate::{
     webview_get_url, webview_keyboard_in_cross_origin_iframe, webview_navigate,
     webview_wait_for_selector, CURRENT_SITE,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -1768,6 +1768,15 @@ pub(crate) async fn collect_nearby_interactive(limit: usize) -> Vec<Value> {
     }
 }
 
+/// The folder for one instance's files, created when missing.
+async fn site_dir(site: &str) -> Result<std::path::PathBuf> {
+    let dir = get_sites_path().join(site);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .with_context(|| format!("cannot create {}", dir.display()))?;
+    Ok(dir)
+}
+
 /// navigate — go to a URL.
 async fn tool_navigate(args: &Value) -> Result<Value> {
     let site = args["site"]
@@ -1784,10 +1793,6 @@ async fn tool_navigate(args: &Value) -> Result<Value> {
         url,
         timeout_ms
     );
-
-    // Create the site folder
-    let site_path = get_sites_path().join(site);
-    tokio::fs::create_dir_all(&site_path).await?;
 
     // Check that the WebView is ready
     if !is_webview_ready().await {
@@ -1883,23 +1888,26 @@ async fn tool_get_html(args: &Value) -> Result<Value> {
                 let original_length = html.len();
 
                 // 1. Save to the file (always the original HTML)
-                if let Some(filename) = save_to {
-                    let site_path = get_sites_path().join(site);
-                    tokio::fs::create_dir_all(&site_path).await?;
-                    tokio::fs::write(site_path.join(filename), &html).await?;
-                }
+                let saved_to = match save_to {
+                    Some(filename) => {
+                        let path = site_dir(site).await?.join(filename);
+                        tokio::fs::write(&path, &html)
+                            .await
+                            .with_context(|| format!("cannot write {}", path.display()))?;
+                        Some(path.display().to_string())
+                    }
+                    None => None,
+                };
 
                 // 2. file_only: together with save_to, do not return the HTML
-                if file_only {
-                    if let Some(save_to_val) = &save_to {
-                        return Ok(serde_json::json!({
-                            "status": "completed",
-                            "html": null,
-                            "length": original_length,
-                            "saved_to": format!("sites/{}/{}", site, save_to_val),
-                            "file_only": true
-                        }));
-                    }
+                if file_only && saved_to.is_some() {
+                    return Ok(serde_json::json!({
+                        "status": "completed",
+                        "html": null,
+                        "length": original_length,
+                        "saved_to": saved_to,
+                        "file_only": true
+                    }));
                 }
 
                 // 3. strip_noise: remove the tags and attributes that add nothing
@@ -1935,9 +1943,8 @@ async fn tool_get_html(args: &Value) -> Result<Value> {
                 if do_strip_noise {
                     response["stripped_length"] = serde_json::json!(final_html.len());
                 }
-                if let Some(filename) = save_to {
-                    response["saved_to"] =
-                        serde_json::json!(format!("sites/{}/{}", site, filename));
+                if saved_to.is_some() {
+                    response["saved_to"] = serde_json::json!(saved_to);
                 }
                 Ok(response)
             }
@@ -2560,10 +2567,7 @@ async fn tool_screenshot(args: &Value) -> Result<Value> {
         }));
     }
 
-    // Create the site folder
-    let site_path = get_sites_path().join(site);
-    tokio::fs::create_dir_all(&site_path).await?;
-    let file_path = site_path.join(output_file);
+    let file_path = site_dir(site).await?.join(output_file);
 
     // With a selector, get the element's bounding rect through JS
     //
@@ -3689,7 +3693,7 @@ async fn tool_preprocess_captcha(args: &Value) -> Result<Value> {
         return Ok(serde_json::json!({
             "status": "failed",
             "error": "FILE_NOT_FOUND",
-            "message": format!("Input file not found: sites/{}/{}", site, input_file)
+            "message": format!("Input file not found: {}", input_path.display())
         }));
     }
 
@@ -5539,9 +5543,7 @@ async fn tool_describe(args: &Value) -> Result<Value> {
     // Step 2: Take annotated screenshot
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let site_path = get_sites_path().join(site);
-    tokio::fs::create_dir_all(&site_path).await?;
-    let file_path = site_path.join(output_file);
+    let file_path = site_dir(site).await?.join(output_file);
 
     let capture_result = capture_page(&file_path, &None).await;
 

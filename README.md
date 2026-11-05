@@ -62,7 +62,7 @@ The script downloads the latest [release](https://github.com/gosuda/dalzzack/rel
 
 To change this, set these environment variables before you run the script:
 
-- `DALZZACK_INSTALL_DIR`: the folder for the binary. Use a folder you can write to, because daemon logs go next to the binary.
+- `DALZZACK_INSTALL_DIR`: the folder for the binary.
 - `DALZZACK_NO_MODIFY_PATH=1`: do not change `PATH`.
 
 Windows needs the WebView2 runtime, which Windows 11 already has.

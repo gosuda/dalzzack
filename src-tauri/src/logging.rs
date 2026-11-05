@@ -5,13 +5,9 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-/// Returns the log directory path (logs/ next to the executable)
+/// The folder for daemon logs and crash reports.
 pub fn get_log_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join("logs")
+    crate::state::data_dir().join("logs")
 }
 
 /// Initialize file logging (file + stderr simultaneous output).
@@ -84,23 +80,19 @@ pub fn setup_panic_hook() {
         let backtrace = std::backtrace::Backtrace::capture();
         tracing::error!("Backtrace:\n{}", backtrace);
 
-        if let Ok(log_dir) = std::env::current_exe()
-            .map(|p| p.parent().unwrap_or(std::path::Path::new(".")).join("logs"))
-        {
-            let crash_file = log_dir.join(format!(
-                "crash_{}.log",
-                chrono::Local::now().format("%Y%m%d_%H%M%S")
-            ));
-            let crash_content = format!(
-                "=== dalzzack CRASH ===\nTime: {}\nLocation: {}\nMessage: {}\n\nBacktrace:\n{}\n",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                location,
-                message,
-                backtrace
-            );
-            let _ = std::fs::write(&crash_file, crash_content);
-            eprintln!("[dalzzack] Crash log saved to: {:?}", crash_file);
-        }
+        let crash_file = get_log_path().join(format!(
+            "crash_{}.log",
+            chrono::Local::now().format("%Y%m%d_%H%M%S")
+        ));
+        let crash_content = format!(
+            "=== dalzzack CRASH ===\nTime: {}\nLocation: {}\nMessage: {}\n\nBacktrace:\n{}\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            location,
+            message,
+            backtrace
+        );
+        let _ = std::fs::write(&crash_file, crash_content);
+        eprintln!("[dalzzack] Crash log saved to: {:?}", crash_file);
 
         default_hook(panic_info);
     }));
