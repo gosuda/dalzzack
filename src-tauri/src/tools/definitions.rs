@@ -3875,8 +3875,8 @@ async fn tool_preprocess_captcha(args: &Value) -> Result<Value> {
 
             Ok(serde_json::json!({
                 "status": "completed",
-                "input_file": format!("sites/{}/{}", site, input_file),
-                "output_file": format!("sites/{}/{}", site, output_file),
+                "input_file": input_path.display().to_string(),
+                "output_file": output_path.display().to_string(),
                 "size": size,
                 "dimensions": { "width": width, "height": height },
                 "params": {
