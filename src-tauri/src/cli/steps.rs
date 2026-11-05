@@ -1,14 +1,15 @@
 //! Batch step execution engine — runs a JSON steps file to completion.
 //!
-//! Self-contained: starts browser → runs all steps → prints results → exits.
+//! Without a live instance it is self-contained: starts browser → runs all
+//! steps → prints results → exits. `main` runs steps on a live instance itself.
 
 use std::path::Path;
 
-/// Step definition in the JSON file
+/// One step: a tool and its arguments.
 #[derive(serde::Deserialize, Debug)]
-struct StepDef {
-    tool: String,
-    args: Option<serde_json::Value>,
+pub struct Step {
+    pub tool: String,
+    pub args: Option<serde_json::Value>,
 }
 
 /// Steps file format
@@ -16,44 +17,31 @@ struct StepDef {
 struct StepsFile {
     #[allow(dead_code)]
     name: Option<String>,
-    steps: Vec<StepDef>,
+    steps: Vec<Step>,
+}
+
+/// The JSON in a steps file, or in stdin for `-`, with $ENV_VAR references expanded.
+pub fn read_steps(path: &Path) -> Result<serde_json::Value, String> {
+    let content = if path == Path::new("-") {
+        std::io::read_to_string(std::io::stdin())
+    } else {
+        std::fs::read_to_string(path)
+    }
+    .map_err(|e| format!("Cannot read steps file '{}': {}", path.display(), e))?;
+    serde_json::from_str(&expand_env_vars(&content))
+        .map_err(|e| format!("Invalid steps JSON: {}", e))
+}
+
+/// The steps of a `{"steps": [{"tool": ..., "args": ...}]}` document.
+pub fn object_steps(value: serde_json::Value) -> Result<Vec<Step>, String> {
+    let file: StepsFile =
+        serde_json::from_value(value).map_err(|e| format!("Invalid steps JSON: {}", e))?;
+    Ok(file.steps)
 }
 
 /// Run batch steps: start a Tauri WebView, execute steps, exit.
-pub fn run_steps(instance_id: &str, steps_path: &Path) {
-    // Read and parse steps file
-    let content = match std::fs::read_to_string(steps_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "status": "failed",
-                    "error": format!("Cannot read steps file '{}': {}", steps_path.display(), e),
-                })
-            );
-            std::process::exit(1);
-        }
-    };
-
-    // Expand $ENV_VAR references in the content
-    let content = expand_env_vars(&content);
-
-    let steps_file: StepsFile = match serde_json::from_str(&content) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "status": "failed",
-                    "error": format!("Invalid steps JSON: {}", e),
-                })
-            );
-            std::process::exit(1);
-        }
-    };
-
-    if steps_file.steps.is_empty() {
+pub fn run_steps(instance_id: &str, steps: Vec<Step>) {
+    if steps.is_empty() {
         println!(
             "{}",
             serde_json::json!({ "status": "completed", "message": "No steps to execute" })
@@ -68,10 +56,9 @@ pub fn run_steps(instance_id: &str, steps_path: &Path) {
     tracing::info!(
         "=== dalzzack Batch Run Starting (id: {}, steps: {}) ===",
         instance_id,
-        steps_file.steps.len()
+        steps.len()
     );
 
-    let steps = steps_file.steps;
     let id_clone = instance_id.to_string();
     let id_for_gui = instance_id.to_string();
 
@@ -261,6 +248,19 @@ fn expand_env_vars(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_steps_document_gives_tools_and_arguments() {
+        let value = serde_json::json!({
+            "name": "login",
+            "steps": [{ "tool": "get_html" }, { "tool": "click", "args": { "x": 1 } }],
+        });
+        let steps = object_steps(value).unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].tool, "get_html");
+        assert_eq!(steps[1].args, Some(serde_json::json!({ "x": 1 })));
+        assert!(object_steps(serde_json::json!({ "steps": 1 })).is_err());
+    }
 
     #[test]
     fn a_failure_inside_a_tool_result_stops_the_run() {

@@ -1180,12 +1180,16 @@ enum Cli {
         no_locked: bool,
     },
 
-    /// Run batch steps from a JSON file (self-contained: starts browser, runs, exits)
+    /// Run several steps in one call. With the id of a live instance, the steps run
+    /// there and one result is printed. Otherwise this starts a browser, runs the
+    /// steps, prints one line per step, and exits. A failed step stops the run.
     Run {
         /// Instance ID (auto-generates if omitted)
         #[arg(long, short)]
         id: Option<String>,
-        /// Path to JSON steps file
+        /// JSON steps file, or - for stdin: a list of commands such as
+        /// [["click", "--text", "OK"], ["wait-for", "--selector", ".done"]], or
+        /// {"steps": [{"tool": "click_element", "args": {"text": "OK"}}]}
         #[arg(long)]
         steps: PathBuf,
     },
@@ -1685,8 +1689,23 @@ fn main() {
             );
         }
         Cli::Run { id, steps } => {
-            let instance_id = id.unwrap_or_else(|| format!("run-{}", std::process::id()));
-            dalzzack_lib::cli::run_steps(&instance_id, &steps);
+            let steps = load_steps(&steps).unwrap_or_else(|message| {
+                println!(
+                    "{}",
+                    serde_json::json!({ "status": "failed", "error": "USAGE", "message": message })
+                );
+                std::process::exit(2);
+            });
+            let live = id
+                .as_deref()
+                .filter(|id| dalzzack_lib::daemon::ping_info(id).is_some());
+            match live {
+                Some(id) => std::process::exit(run_on_instance(id, steps, &filter)),
+                None => {
+                    let instance_id = id.unwrap_or_else(|| format!("run-{}", std::process::id()));
+                    dalzzack_lib::cli::run_steps(&instance_id, steps);
+                }
+            }
         }
         Cli::Install { target, refresh } => match target {
             Some(target) if !refresh => install_docs(&target),
@@ -1748,6 +1767,95 @@ fn main() {
             }
         }
     }
+}
+
+/// All steps of a steps file. They are read first, so that a mistake in the last
+/// one does not leave the first ones done.
+fn load_steps(path: &std::path::Path) -> Result<Vec<dalzzack_lib::cli::Step>, String> {
+    match dalzzack_lib::cli::read_steps(path)? {
+        serde_json::Value::Array(lines) => lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| command_step(line).map_err(|e| format!("step {}: {e}", i + 1)))
+            .collect(),
+        document => dalzzack_lib::cli::object_steps(document),
+    }
+}
+
+/// One `["click", "--text", "OK"]` step, read with the CLI's own definitions.
+fn command_step(line: &serde_json::Value) -> Result<dalzzack_lib::cli::Step, String> {
+    let words: Option<Vec<&str>> = line
+        .as_array()
+        .map(|words| words.iter().map(|word| word.as_str()).collect())
+        .unwrap_or_default();
+    let words = words.ok_or("expected a list of strings")?;
+    let parsed = Args::try_parse_from(std::iter::once("dalzzack").chain(words)).map_err(|e| {
+        e.render()
+            .to_string()
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    })?;
+    if matches!(
+        parsed.cmd,
+        Cli::Start { .. }
+            | Cli::Stop { .. }
+            | Cli::Kill { .. }
+            | Cli::List
+            | Cli::Daemon { .. }
+            | Cli::Run { .. }
+            | Cli::Install { .. }
+            | Cli::Tools { .. }
+            | Cli::Upgrade { .. }
+    ) {
+        return Err("only commands that act on a page can be a step".to_string());
+    }
+    let (_, tool, args) = cli_to_tool_call(parsed.cmd);
+    Ok(dalzzack_lib::cli::Step {
+        tool,
+        args: Some(args),
+    })
+}
+
+/// Run steps on a live instance and print one result: the last step's, or the
+/// failed step's. Returns the exit code.
+fn run_on_instance(
+    id: &str,
+    steps: Vec<dalzzack_lib::cli::Step>,
+    filter: &dalzzack_lib::cli::output::OutputFilter,
+) -> i32 {
+    let total = steps.len();
+    let mut last = serde_json::Value::Null;
+    for (i, step) in steps.into_iter().enumerate() {
+        let args = step.args.unwrap_or_else(|| serde_json::json!({}));
+        let result = dalzzack_lib::daemon::send_command(id, &step.tool, args.clone())
+            .unwrap_or_else(|e| serde_json::json!({ "status": "failed", "error": e.to_string() }));
+        if result["status"] == "failed" {
+            let failed = serde_json::json!({
+                "status": "failed",
+                "steps_run": i + 1,
+                "steps_total": total,
+                "failed_step": i + 1,
+                "tool": step.tool,
+                "result": result,
+            });
+            emit(&failed, filter, "", &serde_json::Value::Null);
+            return 1;
+        }
+        last = if filter.full {
+            result
+        } else {
+            dalzzack_lib::cli::brief::brief(&step.tool, &args, &result)
+        };
+    }
+    let done = serde_json::json!({
+        "status": "completed",
+        "steps_run": total,
+        "steps_total": total,
+        "last": last,
+    });
+    emit(&done, filter, "", &serde_json::Value::Null)
 }
 
 /// `tools`: all schemas, the names only, or one tool. A CLI spelling with
@@ -3258,6 +3366,32 @@ fn install_docs(target: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_step_is_a_command_line() {
+        use serde_json::json;
+        let step = command_step(&json!(["click", "--text", "Sign In"])).unwrap();
+        assert_eq!(step.tool, "click_element");
+        assert_eq!(step.args.unwrap()["text"], "Sign In");
+
+        let step = command_step(&json!(["get-html", "--selector", "h1"])).unwrap();
+        assert_eq!(step.tool, "get_html");
+    }
+
+    #[test]
+    fn a_step_that_is_not_a_page_command_is_refused() {
+        use serde_json::json;
+        for line in [
+            json!(["stop", "--id", "b"]),
+            json!(["run", "--steps", "x.json"]),
+            json!(["upgrade"]),
+            json!(["no-such-command"]),
+            json!(["click", 5]),
+            json!("click"),
+        ] {
+            assert!(command_step(&line).is_err(), "{line}");
+        }
+    }
 
     #[test]
     fn tools_prints_one_tool_or_only_the_names() {
