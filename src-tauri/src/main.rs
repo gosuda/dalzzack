@@ -1131,8 +1131,15 @@ enum Cli {
 
     /// Print the JSON schema for every tool the daemon exposes.
     /// Use this so an LLM (or MCP client) can discover the available
-    /// tool surface without hardcoding names.
-    Tools,
+    /// tool surface without hardcoding names. The whole list is 64 KB:
+    /// use --names, then ask for one tool.
+    Tools {
+        /// Print one tool, such as `get_html` or `get-html`
+        name: Option<String>,
+        /// Print the tool names only
+        #[arg(long, conflicts_with = "name")]
+        names: bool,
+    },
 
     /// Upgrade dalzzack in place via `cargo install`.
     /// Stops any running daemons first so they pick up the new code.
@@ -1670,9 +1677,9 @@ fn main() {
             Some(target) if !refresh => install_docs(&target),
             _ => refresh_docs(),
         },
-        Cli::Tools => {
+        Cli::Tools { name, names } => {
             let defs = dalzzack_lib::tools::definitions::get_tool_definitions();
-            let v = serde_json::to_value(&defs).unwrap_or_else(|_| serde_json::json!([]));
+            let v = tools_output(&defs, name.as_deref(), names);
             std::process::exit(emit(&v, &filter, "", &serde_json::Value::Null));
         }
         Cli::Upgrade {
@@ -1725,6 +1732,30 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+/// `tools`: all schemas, the names only, or one tool. A CLI spelling with
+/// hyphens finds the same tool.
+fn tools_output(
+    defs: &[dalzzack_lib::tools::definitions::ToolDefinition],
+    name: Option<&str>,
+    names_only: bool,
+) -> serde_json::Value {
+    if names_only {
+        return serde_json::json!(defs.iter().map(|d| &d.name).collect::<Vec<_>>());
+    }
+    let Some(name) = name else {
+        return serde_json::json!(defs);
+    };
+    let wanted = name.replace('-', "_");
+    match defs.iter().find(|d| d.name == wanted) {
+        Some(def) => serde_json::json!(def),
+        None => serde_json::json!({
+            "status": "failed",
+            "error": "UNKNOWN_TOOL",
+            "message": format!("No tool is named {name}. `dalzzack tools --names` lists them."),
+        }),
     }
 }
 
@@ -2383,7 +2414,7 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
         | Cli::Daemon { .. }
         | Cli::Run { .. }
         | Cli::Install { .. }
-        | Cli::Tools
+        | Cli::Tools { .. }
         | Cli::Upgrade { .. } => {
             unreachable!("handled in main()")
         }
@@ -3203,6 +3234,25 @@ fn install_docs(target: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tools_prints_one_tool_or_only_the_names() {
+        let defs = dalzzack_lib::tools::definitions::get_tool_definitions();
+        let names = tools_output(&defs, None, true);
+        assert_eq!(names.as_array().unwrap().len(), defs.len());
+        assert!(names.to_string().len() < 2048);
+
+        let one = tools_output(&defs, Some("get-html"), false);
+        assert_eq!(one["name"], "get_html");
+        assert_eq!(tools_output(&defs, Some("get_html"), false), one);
+        assert!(one["inputSchema"].is_object());
+
+        assert_eq!(tools_output(&defs, Some("nope"), false)["status"], "failed");
+        assert_eq!(
+            tools_output(&defs, None, false).as_array().unwrap().len(),
+            defs.len()
+        );
+    }
 
     #[test]
     fn the_guide_replaces_its_own_block_and_leaves_the_rest() {
