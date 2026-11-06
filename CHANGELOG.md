@@ -14,6 +14,8 @@ All notable changes to dalzzack. The format loosely follows
   `--purge` also deletes data and browser logins. `--project` cleans only
   `./AGENTS.md`, so it can run in each project first.
 - `DALZZACK_VERSION` selects a release in the install scripts.
+- `scripts/verify-release.sh` and `scripts/verify-release.ps1` check a published
+  release from install to uninstall.
 - One-line install scripts, so installing no longer needs a list of commands:
   `scripts/install.sh` for macOS and `scripts/install.ps1` for Windows. Each
   downloads the latest release, checks its SHA-256 hash, and adds the binary to

@@ -31,6 +31,7 @@ dalzzack --help
 | Install to PATH | `npm run deploy` (or `cd src-tauri && cargo install --path .`) |
 | Run unit tests | `cd src-tauri && cargo test --lib --bins` |
 | Run smoke test (real browser) | `bash scripts/smoke.sh` |
+| Check a published release | `sh scripts/verify-release.sh <tag>`, or `pwsh -File scripts/verify-release.ps1 <tag>` |
 | Lint | `cd src-tauri && cargo clippy --all-targets -- -D warnings` |
 | Format | `cd src-tauri && cargo fmt` |
 
