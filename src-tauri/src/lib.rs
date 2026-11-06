@@ -20,6 +20,8 @@ pub mod daemon;
 pub mod diagnostics;
 /// Which browser engine this daemon drives (`webview` or `chrome`).
 pub mod engine;
+/// The dalzzack block in an agent's instruction file.
+pub mod guide_file;
 /// Document-start script injection into a chosen JS world.
 pub mod inject;
 pub mod injection;
@@ -46,6 +48,10 @@ pub mod tools;
 pub mod types;
 /// User-Agent resolution and engine-version detection.
 pub mod ua;
+/// `uninstall` — undo the install and the changes to agent files.
+pub mod uninstall;
+/// `upgrade` — replace the binary with the latest release.
+pub mod upgrade;
 pub mod webview;
 
 // Re-export public API for backward compatibility

@@ -1,6 +1,6 @@
 //! Global application state and helper accessors.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, WebviewWindow};
@@ -116,17 +116,68 @@ pub async fn wait_for_main_window(budget: std::time::Duration) -> Option<Webview
     }
 }
 
-/// Return the sites directory path (relative to the executable)
+/// The user's home folder: `HOME`, else `USERPROFILE`.
+pub fn home_dir() -> PathBuf {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            eprintln!("Error: Could not determine home directory (HOME / USERPROFILE not set)");
+            std::process::exit(1);
+        })
+}
+
+/// Where dalzzack keeps what it writes: screenshots and logs.
+///
+/// Per-user, and never next to the binary: the install folder may not be
+/// writable (`C:\Windows\System32`, `/usr/local/bin`), and `navigate` failed
+/// there with a bare `os error 5`.
+pub fn data_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("dalzzack")
+}
+
+/// The absolute form of `path`, for printing. On Windows, `canonicalize` gives a
+/// `\\?\` path, which many programs cannot open, Git Bash among them.
+pub fn printable_path(path: &Path) -> String {
+    let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    without_verbatim_prefix(&absolute.to_string_lossy())
+}
+
+fn without_verbatim_prefix(path: &str) -> String {
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(share) => format!(r"\\{share}"),
+            None => rest.to_string(),
+        },
+        None => path.to_string(),
+    }
+}
+
+/// The folder that holds one sub-folder of files per instance.
 pub fn get_sites_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join("sites")
+    data_dir().join("sites")
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn printed_paths_have_no_verbatim_prefix() {
+        let plain = super::without_verbatim_prefix;
+        assert_eq!(plain(r"\\?\D:\a\b.png"), r"D:\a\b.png");
+        assert_eq!(plain(r"\\?\UNC\host\share\b.png"), r"\\host\share\b.png");
+        assert_eq!(plain("/Users/a/b.png"), "/Users/a/b.png");
+    }
+
+    #[test]
+    fn files_never_go_next_to_the_binary() {
+        let exe = std::env::current_exe().unwrap();
+        let exe_dir = exe.parent().unwrap();
+        assert!(!super::get_sites_path().starts_with(exe_dir));
+        assert!(super::get_sites_path().starts_with(super::data_dir()));
+    }
+
     #[test]
     fn csp_is_never_reported_as_bypassed_off_windows() {
         // `Page.setBypassCSP` needs CDP, which only WebView2 has. Claiming a

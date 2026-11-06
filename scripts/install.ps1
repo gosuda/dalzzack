@@ -5,9 +5,9 @@
 # Environment:
 #   DALZZACK_INSTALL_DIR     Where to put the binary
 #                            (default: %LOCALAPPDATA%\Programs\dalzzack).
-#                            Use a folder you can write to: daemon logs go next
-#                            to the binary.
 #   DALZZACK_NO_MODIFY_PATH  Set to 1 to leave your user PATH alone.
+#   DALZZACK_VERSION         The release tag to install, such as v1.1.0-rc.2
+#                            (default: the latest release).
 #
 # Rules for this file:
 # - It runs through `iex`, inside the session of the user. `exit` would close
@@ -30,6 +30,9 @@
 
     $asset = 'dalzzack-windows-x64.zip'
     $baseUrl = 'https://github.com/gosuda/dalzzack/releases/latest/download'
+    if ($env:DALZZACK_VERSION) {
+        $baseUrl = "https://github.com/gosuda/dalzzack/releases/download/$env:DALZZACK_VERSION"
+    }
 
     $dir = $env:DALZZACK_INSTALL_DIR
     if (-not $dir) { $dir = Join-Path $env:LOCALAPPDATA 'Programs\dalzzack' }
@@ -102,4 +105,7 @@
     Write-Host ''
     Write-Host 'Next, open a new terminal and give your agents the usage guide:'
     Write-Host '  dalzzack install all'
+    Write-Host ''
+    Write-Host 'To update later:'
+    Write-Host '  dalzzack upgrade'
 }

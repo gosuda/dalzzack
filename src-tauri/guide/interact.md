@@ -1,0 +1,11 @@
+**Interact:**
+- `click --x X --y Y` | `click --selector CSS` | `click --text "..."` — click by coordinates, selector, or text
+- `hover --selector CSS` / `hover --x X --y Y` — move the cursor (macOS uses native CGEvent so CSS `:hover` fires; Windows/Linux dispatch JS events only and set `native_hover: false`; the Chrome engine moves Chrome's own pointer, `native_hover: true`). Use this for dropdown menus and tooltips.
+- `fill-form --selector CSS --value TEXT` — fill single field (shorthand)
+- `fill-form --fields '[{"selector":"#a","value":"1"}]'` — fill multiple fields (JSON)
+- `keyboard --text "hello"` | `keyboard --text "long" --paste` — type or paste text
+- `keyboard --key Enter [--modifiers ctrl,shift]` — press special keys
+- `scroll --to top|bottom [--selector CSS]` — absolute scroll
+- `scroll [--direction down] [--amount 500] [--selector CSS]` — relative scroll
+- `upload-file --selector "input[type=file]" --file PATH`
+- `save-image --selector CSS --output PATH [--index -1]` — save DOM image (default: last match)

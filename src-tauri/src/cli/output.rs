@@ -10,7 +10,18 @@
 use jaq_core::load::{Arena, File, Loader};
 use jaq_core::{data, unwrap_valr, Compiler, Ctx, Vars};
 use jaq_json::Val;
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// The default limit for piped output, in bytes: about 5,000 tokens.
+pub const DEFAULT_MAX_OUTPUT: usize = 16 * 1024;
+
+/// How much of a saved result the summary shows.
+const PREVIEW_CHARS: usize = 1_000;
+
+/// Saved results older than this are deleted when the next one is saved.
+const SAVED_OUTPUT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// What the user asked for.
 #[derive(Debug, Clone, Default)]
@@ -19,6 +30,13 @@ pub struct OutputFilter {
     pub jq: Option<String>,
     /// Print string results without JSON quotes (`jq -r`).
     pub raw: bool,
+    /// Print indented JSON. Every other byte of indent is a token nobody reads
+    /// when the output goes to an agent.
+    pub pretty: bool,
+    /// Print the complete result and not its short form.
+    pub full: bool,
+    /// Above this many bytes, save the output to a file and print a summary.
+    pub max_output: Option<usize>,
 }
 
 impl OutputFilter {
@@ -296,12 +314,12 @@ pub fn render(v: &Value, f: &OutputFilter) -> Result<String, String> {
         let outs = run_jq(program, v)?;
         return Ok(outs
             .iter()
-            .map(|o| show(o, f.raw))
+            .map(|o| show(o, f))
             .collect::<Vec<_>>()
             .join("\n"));
     }
     if f.fields.is_empty() {
-        return Ok(show(v, f.raw));
+        return Ok(show(v, f));
     }
     let pick = |path: &str| -> Result<Value, String> {
         let outs = run_jq(&field_to_jq(path), v)?;
@@ -312,25 +330,88 @@ pub fn render(v: &Value, f: &OutputFilter) -> Result<String, String> {
         })
     };
     if f.fields.len() == 1 {
-        return Ok(show(&pick(&f.fields[0])?, f.raw));
+        return Ok(show(&pick(&f.fields[0])?, f));
     }
     let mut obj = serde_json::Map::new();
     for p in &f.fields {
         obj.insert(p.clone(), pick(p)?);
     }
-    Ok(show(&Value::Object(obj), f.raw))
+    Ok(show(&Value::Object(obj), f))
 }
 
-fn show(v: &Value, raw: bool) -> String {
+/// The default print of a result: `text` as it is, or a summary when it is over
+/// the limit. A result of 5 MB printed to an agent would end its session, and a
+/// harness that cuts the text loses the end of it, so the whole text goes to a
+/// file. Output that a filter chose never comes here: the caller asked for it.
+pub fn limited(text: String, result: &Value, tool: &str, args: &Value, f: &OutputFilter) -> String {
+    let dir = crate::state::data_dir().join("output");
+    limited_in(&dir, text, result, tool, args, f)
+}
+
+fn limited_in(
+    dir: &Path,
+    text: String,
+    result: &Value,
+    tool: &str,
+    args: &Value,
+    f: &OutputFilter,
+) -> String {
+    // A failure stays whole, and a caller that set a length has already decided
+    // how much to read.
+    let keep_whole = result["status"] == "failed" || !args["max_length"].is_null();
+    match f.max_output {
+        Some(limit) if text.len() > limit && !keep_whole => {}
+        _ => return text,
+    }
+    let saved_to = match save_output(dir, tool, &text) {
+        Ok(path) => path,
+        Err(e) => {
+            // The text has no other home, so it stays.
+            eprintln!(
+                "[dalzzack] printing all the output: cannot save it in {}: {e}",
+                dir.display()
+            );
+            return text;
+        }
+    };
+    let mut summary = json!({
+        "status": result["status"],
+        "truncated": true,
+        "bytes": text.len(),
+        "saved_to": saved_to.display().to_string(),
+        "preview": text.chars().take(PREVIEW_CHARS).collect::<String>(),
+        "hint": "This output is over the limit, so all of it is in the file `saved_to`. Read the \
+                 file, or narrow the result with --field, --jq, or --selector. --max-output \
+                 changes the limit.",
+    });
+    if let Some(fields) = result.as_object() {
+        summary["keys"] = json!(fields.keys().collect::<Vec<_>>());
+    }
+    summary.to_string()
+}
+
+fn save_output(dir: &Path, tool: &str, text: &str) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    crate::logging::delete_old_files(dir, "json", SAVED_OUTPUT_RETENTION);
+    let name = if tool.is_empty() { "output" } else { tool };
+    let now = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let path = dir.join(format!("{name}-{now}-{}.json", std::process::id()));
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
+/// One value as text, the way `f` asks for it.
+pub fn show(v: &Value, f: &OutputFilter) -> String {
     match v {
-        Value::String(s) if raw => s.clone(),
+        Value::String(s) if f.raw => s.clone(),
         // A fanned-out list of strings under --raw: one per line, like `jq -r .[]`.
-        Value::Array(items) if raw && items.iter().all(|i| i.is_string()) => items
+        Value::Array(items) if f.raw && items.iter().all(|i| i.is_string()) => items
             .iter()
             .filter_map(|i| i.as_str())
             .collect::<Vec<_>>()
             .join("\n"),
-        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+        other if f.pretty => serde_json::to_string_pretty(other).unwrap_or_default(),
+        other => serde_json::to_string(other).unwrap_or_default(),
     }
 }
 
@@ -400,6 +481,93 @@ mod tests {
         let back: Value = serde_json::from_str(&many).unwrap();
         assert_eq!(back["status"], "completed");
         assert_eq!(back["instances[].port"], json!([1, 2]));
+    }
+
+    #[test]
+    fn json_is_compact_unless_pretty_is_asked_for() {
+        let v = json!({ "a": [1] });
+        let plain = OutputFilter::default();
+        assert_eq!(render(&v, &plain).unwrap(), r#"{"a":[1]}"#);
+        let pretty = OutputFilter {
+            pretty: true,
+            ..Default::default()
+        };
+        assert!(render(&v, &pretty).unwrap().contains("\n  "));
+    }
+
+    #[test]
+    fn output_over_the_limit_goes_to_a_file() {
+        let dir = std::env::temp_dir().join(format!("dalzzack-output-{}", std::process::id()));
+        let f = OutputFilter {
+            max_output: Some(100),
+            ..Default::default()
+        };
+        let result = json!({ "status": "completed", "result": "x".repeat(500) });
+        let text = result.to_string();
+
+        let summary = limited_in(&dir, text.clone(), &result, "execute_js", &json!({}), &f);
+        let summary: Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(summary["status"], "completed");
+        assert_eq!(summary["truncated"], true);
+        assert_eq!(summary["bytes"], text.len());
+        assert_eq!(summary["keys"], json!(["result", "status"]));
+        assert!(text.starts_with(summary["preview"].as_str().unwrap()));
+        let saved = summary["saved_to"].as_str().unwrap();
+        assert!(saved.contains("execute_js-"));
+        assert_eq!(std::fs::read_to_string(saved).unwrap(), text);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failure_is_never_replaced_by_a_summary() {
+        let dir = std::env::temp_dir().join("dalzzack-output-never-created-2");
+        let f = OutputFilter {
+            max_output: Some(100),
+            ..Default::default()
+        };
+        let result = json!({ "status": "failed", "error": "X", "message": "m".repeat(500) });
+        let text = result.to_string();
+        assert_eq!(
+            limited_in(&dir, text.clone(), &result, "click", &json!({}), &f),
+            text
+        );
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn output_that_cannot_be_saved_is_printed() {
+        // A file where the folder must go, so the folder cannot be created.
+        let dir = std::env::temp_dir().join(format!("dalzzack-not-a-dir-{}", std::process::id()));
+        std::fs::write(&dir, "").unwrap();
+        let f = OutputFilter {
+            max_output: Some(100),
+            ..Default::default()
+        };
+        let result = json!({ "status": "completed" });
+        let text = "x".repeat(500);
+        assert_eq!(
+            limited_in(&dir, text.clone(), &result, "get_html", &json!({}), &f),
+            text
+        );
+        std::fs::remove_file(&dir).unwrap();
+    }
+
+    #[test]
+    fn output_stays_whole_under_the_limit_or_when_a_length_was_set() {
+        let dir = std::env::temp_dir().join("dalzzack-output-never-created");
+        let result = json!({ "status": "completed" });
+        let text = "x".repeat(500);
+        let keep = |max_output, args: Value| {
+            let f = OutputFilter {
+                max_output,
+                ..Default::default()
+            };
+            limited_in(&dir, text.clone(), &result, "get_html", &args, &f)
+        };
+        assert_eq!(keep(None, json!({})), text);
+        assert_eq!(keep(Some(500), json!({})), text);
+        assert_eq!(keep(Some(100), json!({ "max_length": 400 })), text);
+        assert!(!dir.exists());
     }
 
     #[test]

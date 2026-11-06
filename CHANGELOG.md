@@ -4,19 +4,61 @@ All notable changes to dalzzack. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [SemVer](https://semver.org).
 
-## [Unreleased]
+## [1.1.0] - 2026-11-06
 
 ### Added
 
+- `dalzzack uninstall` undoes the install. Alone, it prints what would change and
+  changes nothing. `--yes` stops daemons, removes the guide from the global
+  Claude Code and Codex files, removes the `PATH` entry, and deletes the binary.
+  `--purge` also deletes data and browser logins. `--project` cleans only
+  `./AGENTS.md`, so it can run in each project first.
+- `DALZZACK_VERSION` selects a release in the install scripts.
+- `scripts/verify-release.sh` and `scripts/verify-release.ps1` check a published
+  release from install to uninstall.
 - One-line install scripts, so installing no longer needs a list of commands:
   `scripts/install.sh` for macOS and `scripts/install.ps1` for Windows. Each
   downloads the latest release, checks its SHA-256 hash, and adds the binary to
   `PATH` without `sudo` or administrator rights. Run the script again to update.
 - `dalzzack install codex-project` writes `./AGENTS.md`, as `install codex` did
   before.
+- `dalzzack get-text` prints the visible text of the page or one element, the
+  cheapest way to read a page.
+- `dalzzack guide <topic>` prints a part of the usage guide.
+- `dalzzack tools --names` and `dalzzack tools <name>`, so that nobody needs the
+  64 KB list to read one schema.
+- `dalzzack run -i <id>` runs steps on a live instance and prints one result.
+  Steps can be command lines, such as `["click", "--text", "OK"]`, and `--steps -`
+  reads them from stdin.
+- `dalzzack install --refresh` rewrites the guide in global files that already
+  have it, and creates nothing.
+- `--pretty`, `--full`, `--max-output`, and `DALZZACK_OUTPUT=full`. See Changed.
+- `get-html --no-strip-noise`, because raw HTML could not be read at all.
+- `describe` reports `total`, because `elementCount` stops at the cap of 50.
 
 ### Changed
 
+- `dalzzack upgrade` now installs the latest release and needs no Rust. It checks
+  the hash and the version of the new binary before it stops any daemon, and it
+  refreshes the installed guides. `update` is an alias, `--check` prints the
+  versions, `--force` reinstalls, and `--tag` installs one tag. `--path`, `--git`,
+  `--rev`, and `--no-locked` still build from source with cargo. Version 1.0.0
+  builds from source when it upgrades, so to leave it, run the install command once.
+- Output in a pipe is shorter, and a terminal is unchanged. JSON is compact, and
+  `navigate`, `wait-navigation`, `describe`, `console-logs`, `exec-js`, and `list`
+  print a short form: 74% to 92% smaller on a test page. Over 16 KiB, the default
+  output goes to a file and a summary prints. Failures are never shortened. `--field` and `--jq`
+  read the complete result, and `--full` or `DALZZACK_OUTPUT=full` restore it. A
+  script that reads fields of those commands without a filter needs one of these.
+- The installed guide is about 2.3 KB and not 53 KB, because every agent session
+  pays for it. `dalzzack upgrade` replaces the old block.
+- `get-frames --full` is now the global `--full`, with the same meaning there.
+- `sites/` and `logs/` moved from next to the binary to a per-user folder:
+  `%LOCALAPPDATA%\dalzzack` on Windows, `~/Library/Application Support/dalzzack` on
+  macOS.
+- Logging is at `info` by default, each line stops at 2,000 bytes, and logs older
+  than 7 days are deleted. `DALZZACK_LOG` replaces `RUST_LOG`, and logs no longer
+  go to stderr.
 - `dalzzack install codex` and `dalzzack install all` now write the global Codex
   file, `~/.codex/AGENTS.md` or `$CODEX_HOME/AGENTS.md`, instead of `./AGENTS.md`
   in the current folder. Codex reads the global file in every project and reads
@@ -24,6 +66,28 @@ All notable changes to dalzzack. The format loosely follows
   guide, and it does not read them in untrusted projects. If an earlier version
   wrote the guide into a project, delete the block between
   `<!-- dalzzack-begin -->` and `<!-- dalzzack-end -->` from that `AGENTS.md`.
+
+### Fixed
+
+- `kill`, `start`, `upgrade`, and `uninstall` could force-kill another program. A
+  pid file outlives its daemon over a restart, and the pid can then belong to
+  anything. The pid file now holds the identity of its process, and dalzzack
+  force-kills only that process.
+- `list` and `stop` deleted the files of a daemon that hung, so `kill` could not
+  find it.
+- `navigate`, `describe`, and `screenshot` failed with `os error 5` when the binary
+  was in a folder that cannot be written.
+- `get-html` turned non-ASCII text into mojibake, deleted the text after `style=""`,
+  and left part of an attribute value in the tag.
+- `describe` printed the value of password fields, and a failed `click` printed it
+  in `nearby`. They now print `***`. Hidden inputs left `formValues`.
+- `run --steps` reported success and went on after a failed step.
+- `dalzzack install` deleted the text after the begin marker if the end marker was
+  missing, and replaced a file that it could not read.
+- Printed paths no longer start with `\\?\` on Windows.
+- A Windows debug build crashed on every command with a stack overflow.
+- A release is now public only after all its files exist, and a tag must match the
+  version files.
 
 ## [1.0.0] - 2026-11-03
 

@@ -331,8 +331,13 @@ pub fn process_identity(pid: u32) -> Option<String> {
     }
     #[cfg(unix)]
     {
-        let out = Command::new("ps")
+        // The text must match across processes, so it cannot depend on the
+        // locale or the time zone of the one that asks.
+        // By absolute path: a `ps` that cannot run would read as "no process".
+        let out = Command::new("/bin/ps")
             .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC")
             .stderr(Stdio::null())
             .output()
             .ok()?;

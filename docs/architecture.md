@@ -30,7 +30,8 @@ src-tauri/src/
 ├── cookies.rs          # cookies list|clear
 ├── profile.rs          # Which profile a daemon uses, who shares it
 ├── reset.rs            # reset
-└── cli/                # Batch step execution, --field/--jq output filtering
+├── upgrade.rs          # upgrade: release download, checks, binary swap
+└── cli/                # Batch steps, short form in a pipe, --field/--jq, output limit
 ```
 
 ## Platform matrix

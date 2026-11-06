@@ -12,7 +12,7 @@ use crate::{
     webview_get_url, webview_keyboard_in_cross_origin_iframe, webview_navigate,
     webview_wait_for_selector, CURRENT_SITE,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -29,114 +29,149 @@ pub struct ToolDefinition {
 // HTML Noise Stripping Helpers
 // ============================================================================
 
-/// Strip `<script>`, `<style>`, `<noscript>`, `<svg>`, and comment blocks from HTML.
-fn strip_html_noise(html: &str) -> String {
-    // Phase 1: remove tag blocks (script, style, noscript, svg, comments)
-    let mut result = String::with_capacity(html.len());
-    let bytes = html.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
+/// Elements whose whole content is noise.
+const NOISE_BLOCKS: [&[u8]; 4] = [b"script", b"style", b"noscript", b"svg"];
 
-    while i < len {
-        if bytes[i] == b'<' && i + 3 < len {
-            let rest = &html[i..];
-            let rest_lower = rest.to_ascii_lowercase();
-
-            // Remove <!-- ... --> comments
-            if rest.starts_with("<!--") {
-                if let Some(end) = rest.find("-->") {
-                    i += end + 3;
-                    continue;
-                }
-            }
-            // Remove <script...>...</script>
-            if rest_lower.starts_with("<script")
-                && (rest.len() > 7
-                    && (bytes[i + 7] == b' ' || bytes[i + 7] == b'>' || bytes[i + 7] == b'\n'))
-            {
-                if let Some(end) = rest_lower.find("</script>") {
-                    i += end + 9;
-                    continue;
-                }
-            }
-            // Remove <style...>...</style> (not the style= attribute)
-            if rest_lower.starts_with("<style")
-                && (rest.len() > 6
-                    && (bytes[i + 6] == b' ' || bytes[i + 6] == b'>' || bytes[i + 6] == b'\n'))
-            {
-                if let Some(end) = rest_lower.find("</style>") {
-                    i += end + 8;
-                    continue;
-                }
-            }
-            // Remove <noscript...>...</noscript>
-            if rest_lower.starts_with("<noscript") {
-                if let Some(end) = rest_lower.find("</noscript>") {
-                    i += end + 11;
-                    continue;
-                }
-            }
-            // Remove <svg...>...</svg>
-            if rest_lower.starts_with("<svg")
-                && (rest.len() > 4
-                    && (bytes[i + 4] == b' ' || bytes[i + 4] == b'>' || bytes[i + 4] == b'\n'))
-            {
-                if let Some(end) = rest_lower.find("</svg>") {
-                    i += end + 6;
-                    continue;
-                }
-            }
-        }
-        result.push(html.as_bytes()[i] as char);
-        i += 1;
-    }
-
-    // Phase 2: remove style="..." and the data-* attributes that add nothing
-    strip_attributes(&result, &[" style=\"", " data-v-", " data-reactid=\""])
+fn is_html_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
 }
 
-/// Strip HTML attributes whose key starts with any of the given prefixes.
-fn strip_attributes(html: &str, prefixes: &[&str]) -> String {
-    let mut result = html.to_string();
-    for prefix in prefixes {
-        while let Some(start) = result.find(prefix) {
-            let attr_start = start; // includes the leading space
-            let after_prefix = &result[start + prefix.len()..];
+fn ends_tag_name(b: u8) -> bool {
+    is_html_space(b) || matches!(b, b'>' | b'/')
+}
 
-            // An attribute with no value, such as data-v-: it runs to the next space or >
-            if prefix.contains("data-v-") {
-                if let Some(end_pos) = after_prefix.find([' ', '>', '/']) {
-                    let remove_end = start + prefix.len() + end_pos;
-                    result = format!("{}{}", &result[..attr_start], &result[remove_end..]);
-                    continue;
-                }
-                break;
-            }
+/// Remove comments, `<script>`, `<style>`, `<noscript>`, `<svg>`, and the
+/// attributes that only describe presentation or framework bookkeeping.
+///
+/// Every cut falls on an ASCII byte, so the text between cuts stays valid UTF-8
+/// and is copied unchanged.
+fn strip_html_noise(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while let Some(offset) = html[i..].find('<') {
+        let tag = i + offset;
+        out.push_str(&html[i..tag]);
+        i = match noise_block_end(html.as_bytes(), tag) {
+            Some(end) => end,
+            None => copy_tag(html, tag, &mut out),
+        };
+    }
+    out.push_str(&html[i..]);
+    out
+}
 
-            // Find a quoted value ("..." or '...')
-            let first_char = after_prefix.chars().next();
-            match first_char {
-                Some(q @ ('"' | '\'')) => {
-                    if let Some(end) = after_prefix[1..].find(q) {
-                        let remove_end = start + prefix.len() + 1 + end + 1;
-                        result = format!("{}{}", &result[..attr_start], &result[remove_end..]);
-                        continue;
-                    }
-                    break;
-                }
-                _ => {
-                    // Unquoted value: it runs to the next space or >
-                    if let Some(end_pos) = after_prefix.find([' ', '>', '/']) {
-                        let remove_end = start + prefix.len() + end_pos;
-                        result = format!("{}{}", &result[..attr_start], &result[remove_end..]);
-                        continue;
-                    }
-                    break;
-                }
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Where the comment or noise element that opens at `at` ends. `None` for any
+/// other tag, and for a block that never closes: that text is kept.
+fn noise_block_end(bytes: &[u8], at: usize) -> Option<usize> {
+    let rest = &bytes[at..];
+    if rest.starts_with(b"<!--") {
+        return find_bytes(rest, b"-->").map(|end| at + end + 3);
+    }
+    let name = NOISE_BLOCKS.iter().find(|name| {
+        rest.len() > name.len() + 1
+            && rest[1..=name.len()].eq_ignore_ascii_case(name)
+            && ends_tag_name(rest[name.len() + 1])
+    })?;
+    closing_tag_end(rest, name).map(|end| at + end)
+}
+
+/// Where the first `</name>` ends, in any letter case.
+fn closing_tag_end(bytes: &[u8], name: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while let Some(offset) = find_bytes(&bytes[i..], b"</") {
+        let start = i + offset + 2;
+        let after = start + name.len();
+        if bytes.len() > after && bytes[start..after].eq_ignore_ascii_case(name) {
+            let close = after + bytes[after..].iter().position(|b| !is_html_space(*b))?;
+            if bytes[close] == b'>' {
+                return Some(close + 1);
             }
         }
+        i = start;
     }
-    result
+    None
+}
+
+/// Copy the tag at `at` without its noise attributes, and return where to go on.
+/// A `<` that opens no start tag (`</div>`, `<!doctype`, `a < b`) is copied alone.
+fn copy_tag(html: &str, at: usize, out: &mut String) -> usize {
+    let bytes = html.as_bytes();
+    if !bytes.get(at + 1).is_some_and(u8::is_ascii_alphabetic) {
+        out.push('<');
+        return at + 1;
+    }
+    let mut i = at + 1;
+    while i < bytes.len() && !ends_tag_name(bytes[i]) {
+        i += 1;
+    }
+    out.push_str(&html[at..i]);
+    loop {
+        let gap = i;
+        while i < bytes.len() && is_html_space(bytes[i]) {
+            i += 1;
+        }
+        match bytes.get(i) {
+            None => {
+                out.push_str(&html[gap..]);
+                return i;
+            }
+            Some(b'>') => {
+                out.push_str(&html[gap..=i]);
+                return i + 1;
+            }
+            Some(b'/') => {
+                i += 1;
+                out.push_str(&html[gap..i]);
+                continue;
+            }
+            Some(_) => {}
+        }
+        let name_start = i;
+        while i < bytes.len() && !ends_tag_name(bytes[i]) && bytes[i] != b'=' {
+            i += 1;
+        }
+        let name = &bytes[name_start..i];
+        i = attribute_end(bytes, i);
+        if !is_noise_attribute(name) {
+            out.push_str(&html[gap..i]);
+        }
+    }
+}
+
+/// Where an attribute ends, given where its name ends. With no `=` these are
+/// the same place.
+fn attribute_end(bytes: &[u8], name_end: usize) -> usize {
+    let skip_space = |from: usize| {
+        let spaces = bytes[from..].iter().take_while(|b| is_html_space(**b));
+        from + spaces.count()
+    };
+    let equals = skip_space(name_end);
+    if bytes.get(equals) != Some(&b'=') {
+        return name_end;
+    }
+    let value = skip_space(equals + 1);
+    match bytes.get(value) {
+        Some(quote @ (b'"' | b'\'')) => bytes[value + 1..]
+            .iter()
+            .position(|b| b == quote)
+            .map_or(bytes.len(), |end| value + end + 2),
+        _ => bytes[value..]
+            .iter()
+            .position(|b| is_html_space(*b) || *b == b'>')
+            .map_or(bytes.len(), |end| value + end),
+    }
+}
+
+fn is_noise_attribute(name: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(b"style")
+        || name.eq_ignore_ascii_case(b"data-reactid")
+        || name
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"data-v-"))
 }
 
 // ============================================================================
@@ -167,6 +202,19 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "timeout_ms": { "type": "integer", "description": "Page load timeout in milliseconds (default 5000)." }
                 },
                 "required": ["url"]
+            }),
+        },
+
+        ToolDefinition {
+            name: "get_text".to_string(),
+            description: "Return the visible text of the page or one element. Use this to read a page: it is several times smaller than HTML and has the actual words, which a screenshot does not.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "site": site_param(),
+                    "selector": { "type": "string", "description": "CSS selector to scope to a single element (default: whole page)." },
+                    "max_length": { "type": "integer", "description": "Cut the text to N bytes (0 = unlimited)." }
+                }
             }),
         },
 
@@ -963,6 +1011,7 @@ pub async fn execute_tool(name: &str, args: &Value) -> Result<Value> {
     match name {
         "navigate" => tool_navigate(args).await,
         "get_html" => tool_get_html(args).await,
+        "get_text" => tool_get_text(args).await,
         "execute_js" => tool_execute_js(args).await,
         "screenshot" => tool_screenshot(args).await,
         "wait" => tool_wait(args).await,
@@ -1747,7 +1796,7 @@ pub(crate) async fn collect_nearby_interactive(limit: usize) -> Vec<Value> {
         }}
         return JSON.stringify(els.map(function(el) {{
             var r = el.getBoundingClientRect();
-            var t = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim();
+            var t = (el.innerText || (el.type==='password'&&el.value?'***':el.value) || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim();
             return {{
                 tag: el.tagName.toLowerCase(),
                 text: t.substring(0, 60),
@@ -1768,6 +1817,15 @@ pub(crate) async fn collect_nearby_interactive(limit: usize) -> Vec<Value> {
     }
 }
 
+/// The folder for one instance's files, created when missing.
+async fn site_dir(site: &str) -> Result<std::path::PathBuf> {
+    let dir = get_sites_path().join(site);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .with_context(|| format!("cannot create {}", dir.display()))?;
+    Ok(dir)
+}
+
 /// navigate — go to a URL.
 async fn tool_navigate(args: &Value) -> Result<Value> {
     let site = args["site"]
@@ -1784,10 +1842,6 @@ async fn tool_navigate(args: &Value) -> Result<Value> {
         url,
         timeout_ms
     );
-
-    // Create the site folder
-    let site_path = get_sites_path().join(site);
-    tokio::fs::create_dir_all(&site_path).await?;
 
     // Check that the WebView is ready
     if !is_webview_ready().await {
@@ -1883,23 +1937,26 @@ async fn tool_get_html(args: &Value) -> Result<Value> {
                 let original_length = html.len();
 
                 // 1. Save to the file (always the original HTML)
-                if let Some(filename) = save_to {
-                    let site_path = get_sites_path().join(site);
-                    tokio::fs::create_dir_all(&site_path).await?;
-                    tokio::fs::write(site_path.join(filename), &html).await?;
-                }
+                let saved_to = match save_to {
+                    Some(filename) => {
+                        let path = site_dir(site).await?.join(filename);
+                        tokio::fs::write(&path, &html)
+                            .await
+                            .with_context(|| format!("cannot write {}", path.display()))?;
+                        Some(path.display().to_string())
+                    }
+                    None => None,
+                };
 
                 // 2. file_only: together with save_to, do not return the HTML
-                if file_only {
-                    if let Some(save_to_val) = &save_to {
-                        return Ok(serde_json::json!({
-                            "status": "completed",
-                            "html": null,
-                            "length": original_length,
-                            "saved_to": format!("sites/{}/{}", site, save_to_val),
-                            "file_only": true
-                        }));
-                    }
+                if file_only && saved_to.is_some() {
+                    return Ok(serde_json::json!({
+                        "status": "completed",
+                        "html": null,
+                        "length": original_length,
+                        "saved_to": saved_to,
+                        "file_only": true
+                    }));
                 }
 
                 // 3. strip_noise: remove the tags and attributes that add nothing
@@ -1911,14 +1968,7 @@ async fn tool_get_html(args: &Value) -> Result<Value> {
 
                 // 4. max_length: limit the character count
                 let (final_html, truncated) = if max_length > 0 && processed.len() > max_length {
-                    // Cut on a char boundary
-                    let safe_end = processed
-                        .char_indices()
-                        .take_while(|&(idx, _)| idx <= max_length)
-                        .last()
-                        .map(|(idx, c)| idx + c.len_utf8())
-                        .unwrap_or(max_length.min(processed.len()));
-                    (processed[..safe_end].to_string(), true)
+                    (cut_text(&processed, max_length).to_string(), true)
                 } else {
                     (processed, false)
                 };
@@ -1935,9 +1985,8 @@ async fn tool_get_html(args: &Value) -> Result<Value> {
                 if do_strip_noise {
                     response["stripped_length"] = serde_json::json!(final_html.len());
                 }
-                if let Some(filename) = save_to {
-                    response["saved_to"] =
-                        serde_json::json!(format!("sites/{}/{}", site, filename));
+                if saved_to.is_some() {
+                    response["saved_to"] = serde_json::json!(saved_to);
                 }
                 Ok(response)
             }
@@ -1947,6 +1996,77 @@ async fn tool_get_html(args: &Value) -> Result<Value> {
                 "message": "No element matched the selector"
             })),
         },
+        Err(e) => Ok(serde_json::json!({
+            "status": "failed",
+            "error": "JS_EXECUTION_ERROR",
+            "message": e
+        })),
+    }
+}
+
+/// Text without trailing spaces, and with one blank line where a page has many.
+fn tidy_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut after_blank = true;
+    for line in text.lines().map(str::trim_end) {
+        if !line.is_empty() {
+            out.push_str(line);
+            out.push('\n');
+        } else if !after_blank {
+            out.push('\n');
+        }
+        after_blank = line.is_empty();
+    }
+    out.truncate(out.trim_end().len());
+    out
+}
+
+/// The longest start of `text` that fits in `max` bytes.
+fn cut_text(text: &str, max: usize) -> &str {
+    let end = (0..=max.min(text.len()))
+        .rev()
+        .find(|i| text.is_char_boundary(*i))
+        .unwrap_or(0);
+    &text[..end]
+}
+
+/// get_text — the visible text of the page or one element.
+async fn tool_get_text(args: &Value) -> Result<Value> {
+    let selector = args["selector"].as_str();
+    let max_length = args["max_length"].as_u64().unwrap_or(0) as usize;
+
+    if !is_webview_ready().await {
+        return Ok(serde_json::json!({
+            "status": "failed",
+            "error": "WEBVIEW_NOT_FOUND",
+            "message": "WebView not ready"
+        }));
+    }
+
+    let element = match selector {
+        Some(selector) => format!("document.querySelector({})", Value::from(selector)),
+        None => "document.body".to_string(),
+    };
+    let script = format!("var el = {element}; return el ? el.innerText : null;");
+    match webview_execute_js(&script, Some(10000)).await {
+        Ok(Value::Null) => Ok(serde_json::json!({
+            "status": "failed",
+            "error": "SELECTOR_NOT_FOUND",
+            "message": format!("No element matched the selector: {}", selector.unwrap_or("body"))
+        })),
+        Ok(value) => {
+            let text = tidy_text(value.as_str().unwrap_or_default());
+            let truncated = max_length > 0 && text.len() > max_length;
+            let mut response = serde_json::json!({
+                "status": "completed",
+                "text": if truncated { cut_text(&text, max_length) } else { &text },
+                "length": text.len()
+            });
+            if truncated {
+                response["truncated"] = serde_json::json!(true);
+            }
+            Ok(response)
+        }
         Err(e) => Ok(serde_json::json!({
             "status": "failed",
             "error": "JS_EXECUTION_ERROR",
@@ -2560,10 +2680,7 @@ async fn tool_screenshot(args: &Value) -> Result<Value> {
         }));
     }
 
-    // Create the site folder
-    let site_path = get_sites_path().join(site);
-    tokio::fs::create_dir_all(&site_path).await?;
-    let file_path = site_path.join(output_file);
+    let file_path = site_dir(site).await?.join(output_file);
 
     // With a selector, get the element's bounding rect through JS
     //
@@ -2628,15 +2745,9 @@ async fn tool_screenshot(args: &Value) -> Result<Value> {
             let size = metadata.map(|m| m.len()).unwrap_or(0);
             let current_url = webview_get_url().await.unwrap_or_default();
 
-            let absolute_path = file_path
-                .canonicalize()
-                .unwrap_or_else(|_| file_path.clone())
-                .to_string_lossy()
-                .to_string();
-
             Ok(serde_json::json!({
                 "status": "completed",
-                "file": absolute_path,
+                "file": crate::state::printable_path(&file_path),
                 "size": size,
                 "current_url": current_url,
                 "selector": selector
@@ -3689,7 +3800,7 @@ async fn tool_preprocess_captcha(args: &Value) -> Result<Value> {
         return Ok(serde_json::json!({
             "status": "failed",
             "error": "FILE_NOT_FOUND",
-            "message": format!("Input file not found: sites/{}/{}", site, input_file)
+            "message": format!("Input file not found: {}", input_path.display())
         }));
     }
 
@@ -3764,8 +3875,8 @@ async fn tool_preprocess_captcha(args: &Value) -> Result<Value> {
 
             Ok(serde_json::json!({
                 "status": "completed",
-                "input_file": format!("sites/{}/{}", site, input_file),
-                "output_file": format!("sites/{}/{}", site, output_file),
+                "input_file": input_path.display().to_string(),
+                "output_file": output_path.display().to_string(),
                 "size": size,
                 "dimensions": { "width": width, "height": height },
                 "params": {
@@ -5330,19 +5441,12 @@ async fn tool_save_image(args: &Value) -> Result<Value> {
                             tokio::fs::create_dir_all(parent).await.ok();
                         }
                         match tokio::fs::write(path, &bytes).await {
-                            Ok(()) => {
-                                let absolute = path
-                                    .canonicalize()
-                                    .unwrap_or_else(|_| path.to_path_buf())
-                                    .to_string_lossy()
-                                    .to_string();
-                                Ok(serde_json::json!({
-                                    "status": "completed",
-                                    "file": absolute,
-                                    "size": bytes.len(),
-                                    "selector": selector
-                                }))
-                            }
+                            Ok(()) => Ok(serde_json::json!({
+                                "status": "completed",
+                                "file": crate::state::printable_path(path),
+                                "size": bytes.len(),
+                                "selector": selector
+                            })),
                             Err(e) => Ok(serde_json::json!({
                                 "status": "failed",
                                 "error": "WRITE_ERROR",
@@ -5539,27 +5643,19 @@ async fn tool_describe(args: &Value) -> Result<Value> {
     // Step 2: Take annotated screenshot
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let site_path = get_sites_path().join(site);
-    tokio::fs::create_dir_all(&site_path).await?;
-    let file_path = site_path.join(output_file);
+    let file_path = site_dir(site).await?.join(output_file);
 
     let capture_result = capture_page(&file_path, &None).await;
 
     // Step 3: Collect element data + remove overlays (main + same-origin iframes)
     let collect_result = webview_execute_js(
-        "function getInts(doc,ox,oy){return Array.from(doc.querySelectorAll('button,a[href],input,textarea,select')).filter(function(el){var r=el.getBoundingClientRect();return r.width>0&&r.height>0&&(r.bottom+oy)>0&&(r.top+oy)<window.innerHeight&&(r.right+ox)>0&&(r.left+ox)<window.innerWidth&&window.getComputedStyle(el).display!=='none'&&window.getComputedStyle(el).visibility!=='hidden'}).map(function(el){var r=el.getBoundingClientRect();return{el:el,x:r.left+ox,y:r.top+oy,w:r.width,h:r.height}})}var all=getInts(document,0,0);try{var iframes=document.querySelectorAll('iframe');for(var f=0;f<iframes.length;f++){try{var fd=iframes[f].contentDocument;if(fd){var ir=iframes[f].getBoundingClientRect();all=all.concat(getInts(fd,ir.left,ir.top))}}catch(e){}}}catch(e){}all=all.slice(0,50);var elems=[];all.forEach(function(item,i){var t=(item.el.innerText||item.el.value||item.el.getAttribute('aria-label')||'').trim().substring(0,80);elems.push({id:i,tag:item.el.tagName.toLowerCase(),text:t,x:Math.round(item.x+item.w/2),y:Math.round(item.y+item.h/2)})});document.querySelectorAll('[data-tw-label]').forEach(function(e){e.remove()});var fv={};document.querySelectorAll('input,textarea,select').forEach(function(el){if(el.value&&el.value.length>0){fv[el.name||el.id||el.getAttribute('aria-label')||el.tagName]=el.value.substring(0,200)}});try{var iframes=document.querySelectorAll('iframe');for(var f=0;f<iframes.length;f++){try{var fd=iframes[f].contentDocument;if(fd){fd.querySelectorAll('input,textarea,select').forEach(function(el){if(el.value&&el.value.length>0){fv[el.name||el.id||el.getAttribute('aria-label')||el.tagName]=el.value.substring(0,200)}})}}catch(e){}}}catch(e){}return JSON.stringify({url:location.href,title:document.title,elementCount:elems.length,elements:elems,formValues:fv})",
+        "function getInts(doc,ox,oy){return Array.from(doc.querySelectorAll('button,a[href],input,textarea,select')).filter(function(el){var r=el.getBoundingClientRect();return r.width>0&&r.height>0&&(r.bottom+oy)>0&&(r.top+oy)<window.innerHeight&&(r.right+ox)>0&&(r.left+ox)<window.innerWidth&&window.getComputedStyle(el).display!=='none'&&window.getComputedStyle(el).visibility!=='hidden'}).map(function(el){var r=el.getBoundingClientRect();return{el:el,x:r.left+ox,y:r.top+oy,w:r.width,h:r.height}})}var all=getInts(document,0,0);try{var iframes=document.querySelectorAll('iframe');for(var f=0;f<iframes.length;f++){try{var fd=iframes[f].contentDocument;if(fd){var ir=iframes[f].getBoundingClientRect();all=all.concat(getInts(fd,ir.left,ir.top))}}catch(e){}}}catch(e){}var total=all.length;all=all.slice(0,50);var elems=[];all.forEach(function(item,i){var t=(item.el.innerText||(item.el.type==='password'&&item.el.value?'***':item.el.value)||item.el.getAttribute('aria-label')||'').trim().substring(0,80);elems.push({id:i,tag:item.el.tagName.toLowerCase(),text:t,x:Math.round(item.x+item.w/2),y:Math.round(item.y+item.h/2)})});document.querySelectorAll('[data-tw-label]').forEach(function(e){e.remove()});var fv={};document.querySelectorAll('input:not([type=hidden]),textarea,select').forEach(function(el){if(el.value&&el.value.length>0){fv[el.name||el.id||el.getAttribute('aria-label')||el.tagName]=(el.type==='password'&&el.value?'***':el.value).substring(0,200)}});try{var iframes=document.querySelectorAll('iframe');for(var f=0;f<iframes.length;f++){try{var fd=iframes[f].contentDocument;if(fd){fd.querySelectorAll('input:not([type=hidden]),textarea,select').forEach(function(el){if(el.value&&el.value.length>0){fv[el.name||el.id||el.getAttribute('aria-label')||el.tagName]=(el.type==='password'&&el.value?'***':el.value).substring(0,200)}})}}catch(e){}}}catch(e){}return JSON.stringify({url:location.href,title:document.title,total:total,elementCount:elems.length,elements:elems,formValues:fv})",
         Some(10000),
     ).await;
 
     // Step 4: Build response — merge main frame + cross-origin elements
     let metadata = tokio::fs::metadata(&file_path).await;
     let size = metadata.map(|m| m.len()).unwrap_or(0);
-    let absolute_path = file_path
-        .canonicalize()
-        .unwrap_or_else(|_| file_path.clone())
-        .to_string_lossy()
-        .to_string();
-
     let capture_ok = capture_result.is_ok();
 
     let mut parsed: serde_json::Value = match collect_result {
@@ -5590,11 +5686,16 @@ async fn tool_describe(args: &Value) -> Result<Value> {
 
     Ok(serde_json::json!({
         "status": if capture_ok { "completed" } else { "partial" },
-        "file": absolute_path,
+        "file": crate::state::printable_path(&file_path),
         "size": size,
         "url": parsed["url"],
         "title": parsed["title"],
         "elementCount": parsed["elementCount"],
+        "total": parsed["total"].as_u64().unwrap_or(0)
+            + cross_origin_frames
+                .iter()
+                .map(|frame| frame.elements.len() as u64)
+                .sum::<u64>(),
         "elements": parsed["elements"],
         "formValues": parsed["formValues"]
     }))
@@ -5854,27 +5955,78 @@ mod tests {
         assert!(!result.contains("var x"));
     }
 
-    // --- strip_attributes ---
-
     #[test]
-    fn test_strip_attributes_single_word_value() {
-        // strip_attributes with style="" prefix: strips from prefix through next space or >
-        let html = r#"<div style="red">Text</div>"#;
-        let result = strip_attributes(html, &[" style=\""]);
-        // After prefix " style=\"", remaining is 'red">Text</div>'
-        // First char 'r' is not a quote, so it finds next > and strips up to it
-        assert!(result.contains("Text"));
-        assert!(!result.contains("style"));
+    fn page_text_loses_only_empty_space() {
+        assert_eq!(
+            tidy_text("\n\n제목  \n\n\n\n본문\t\n  둘째 줄\n\n"),
+            "제목\n\n본문\n  둘째 줄"
+        );
+        assert_eq!(tidy_text(""), "");
     }
 
     #[test]
-    fn test_strip_attributes_data_v() {
-        let html = r#"<div data-v-12345 class="foo">Text</div>"#;
-        let result = strip_attributes(html, &[" data-v-"]);
-        assert_eq!(result, r#"<div class="foo">Text</div>"#);
+    fn text_is_cut_between_characters() {
+        assert_eq!(cut_text("가나다", 4), "가");
+        assert_eq!(cut_text("가나다", 6), "가나");
+        assert_eq!(cut_text("abc", 2), "ab");
+        assert_eq!(cut_text("abc", 9), "abc");
     }
 
-    // --- focus_script ---
+    #[test]
+    fn strip_keeps_text_that_is_not_ascii() {
+        let html = "<h1>토큰 측정</h1><p>가격 100원 — ok</p>";
+        assert_eq!(strip_html_noise(html), html);
+    }
+
+    #[test]
+    fn strip_removes_a_whole_attribute_and_nothing_else() {
+        // An empty value ate the text up to the next quote; a value with a
+        // space left its second half inside the tag.
+        assert_eq!(
+            strip_html_noise(r#"<td style="">가격</td><td><button class="b">구매</button></td>"#),
+            r#"<td>가격</td><td><button class="b">구매</button></td>"#
+        );
+        assert_eq!(
+            strip_html_noise(
+                r#"<tr data-v-7ba data-reactid="0" style="color: red; font-size: 12px"><td>x</td></tr>"#
+            ),
+            "<tr><td>x</td></tr>"
+        );
+        assert_eq!(
+            strip_html_noise(r#"<p style='a: b' id="x">t</p>"#),
+            r#"<p id="x">t</p>"#
+        );
+        assert_eq!(
+            strip_html_noise(r#"<img src="a.png" style="b"/>"#),
+            r#"<img src="a.png"/>"#
+        );
+    }
+
+    #[test]
+    fn strip_reads_tags_and_not_text() {
+        // Looks like an attribute, but it is text or part of another value.
+        for html in [
+            r#"<pre> style="x" </pre>"#,
+            r#"<a title=' style="x"'>t</a>"#,
+            r#"<a title="a > b">t</a>"#,
+            "<p>1 < 2 and <styled-thing>x</styled-thing></p>",
+            "<!doctype html><html></html>",
+        ] {
+            assert_eq!(strip_html_noise(html), html);
+        }
+    }
+
+    #[test]
+    fn strip_handles_case_and_unfinished_input() {
+        assert_eq!(strip_html_noise("a<SCRIPT>x</Script >b"), "ab");
+        // Nothing to close the block with: keep the text, do not lose the page.
+        assert_eq!(strip_html_noise("a<script>x"), "a<script>x");
+        assert_eq!(strip_html_noise("a<!-- x"), "a<!-- x");
+        assert_eq!(strip_html_noise("<div class=\"x"), "<div class=\"x");
+        assert_eq!(strip_html_noise("<div style=\"x"), "<div");
+        assert_eq!(strip_html_noise("<div "), "<div ");
+        assert_eq!(strip_html_noise("<"), "<");
+    }
 
     #[test]
     fn test_focus_script_with_selector() {

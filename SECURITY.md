@@ -62,6 +62,10 @@ XHR and `fetch` requests are wrapped to capture URL, method, status, content typ
 
 ---
 
+### Self-update
+
+`dalzzack upgrade` downloads a binary from the GitHub releases of this project and runs it. It checks the SHA-256 hash from the `.sha256` file of the same release, which detects a damaged download but not a compromised release. Use `--check` to see what would change, and `--tag` to choose a version.
+
 ## Hardening recommendations for operators
 
 If you ship dalzzack as part of an agent product:

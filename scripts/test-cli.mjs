@@ -10,8 +10,17 @@
  *   node scripts/test-cli.mjs --binary ./dalzzack   # Custom binary path
  */
 
-import { execSync, spawn } from "child_process";
-import { existsSync, unlinkSync, readFileSync, writeFileSync } from "fs";
+import { execFileSync, execSync, spawn } from "child_process";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { join, dirname, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { platform, tmpdir } from "os";
@@ -65,6 +74,8 @@ function run(args, { expectFail = false, timeout = TIMEOUT_MS } = {}) {
       timeout,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
+      // These tests read whole results, not the short form that a pipe gets.
+      env: { ...process.env, DALZZACK_OUTPUT: "full" },
     });
     return { ok: true, output: output.trim(), parsed: tryParse(output) };
   } catch (e) {
@@ -624,8 +635,8 @@ const tests = {
       assert(rdry.dry_run === true && rdry.would_be_refused === true, `reset dry run: ${JSON.stringify(rdry)}`);
 
       // --ttl: the daemon stops itself, private folder and all.
-      const t = run(`start --id ${T} --private-profile --ttl 6s`).parsed;
-      assert(t.ttl_s === 6 && t.expires_at_ms > Date.now(), `ttl start: ${JSON.stringify(t)}`);
+      const t = run(`start --id ${T} --private-profile --ttl 12s`).parsed;
+      assert(t.ttl_s === 12 && t.expires_at_ms > Date.now(), `ttl start: ${JSON.stringify(t)}`);
       const tdir = t.profile && t.profile.path;
       let gone = false;
       for (let i = 0; i < 40 && !gone; i++) {
@@ -747,6 +758,143 @@ const tests = {
       assert(result.parsed, "Should return JSON");
     } finally {
       run(`stop --id ${INSTANCE_ID}`);
+    }
+  },
+
+  // Every path is redirected, also the temp folder: uninstall stops every
+  // daemon it can find, and the port files are there.
+  async uninstall() {
+    const root = mkdtempSync(join(tmpdir(), "dalzzack-uninstall-"));
+    const ext = platform() === "win32" ? ".exe" : "";
+    const bin = join(root, "bin");
+    const home = join(root, "home");
+    const temp = join(root, "temp");
+    const exe = join(bin, "dalzzack" + ext);
+    const claude = join(home, ".claude", "CLAUDE.md");
+    const codex = join(home, ".codex");
+    const zshenv = join(home, ".zshenv");
+    const export_line = `export PATH="${bin}:$PATH"`;
+    for (const dir of [bin, temp, dirname(claude)]) mkdirSync(dir, { recursive: true });
+    copyFileSync(binaryPath, exe);
+    writeFileSync(claude, "# Mine\n");
+    writeFileSync(zshenv, `alias a=b\n\n# Added by the dalzzack installer\n${export_line}\n`);
+    const env = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      CODEX_HOME: codex,
+      TMP: temp,
+      TEMP: temp,
+      TMPDIR: temp,
+      DALZZACK_OUTPUT: "full",
+    };
+    const project = join(root, "project");
+    mkdirSync(project);
+    const dalzzack = (...args) =>
+      JSON.parse(
+        execFileSync(exe, args, {
+          cwd: project,
+          env,
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        }),
+      );
+
+    try {
+      dalzzack("install", "all");
+      const installed = readFileSync(claude, "utf8");
+      assert(installed.includes("dalzzack-begin"), "install should add the guide");
+
+      const plan = dalzzack("uninstall");
+      assert(plan.status === "planned", `Expected planned, got ${plan.status}`);
+      assert(plan.guides.length === 2, "The plan should name both guides");
+      assert(existsSync(exe), "The plan should keep the binary");
+      assert(readFileSync(claude, "utf8") === installed, "The plan should change no file");
+
+      dalzzack("install", "codex-project");
+      const left = dalzzack("uninstall").left.map((entry) => entry.item).join(" ");
+      assert(left.includes("AGENTS.md"), "The plan should name the project guide");
+      const cleaned = dalzzack("uninstall", "--project", "--yes");
+      assert(cleaned.status === "completed", `Expected completed, got ${cleaned.status}`);
+      assert(!existsSync(join(project, "AGENTS.md")), "The project guide should go");
+      assert(existsSync(exe), "--project should keep the binary");
+      assert(readFileSync(claude, "utf8") === installed, "--project should keep the global guide");
+
+      // A pid file left by a daemon that died: uninstall must not kill this pid.
+      const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+      const isAlive = () => {
+        try {
+          process.kill(other.pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      await sleep(300);
+      writeFileSync(join(temp, "dalzzack-stale.port"), "1");
+      writeFileSync(join(temp, "dalzzack-stale.pid"), `${other.pid}\nanother process\n`);
+      writeFileSync(join(temp, "dalzzack-old.port"), "1");
+      writeFileSync(join(temp, "dalzzack-old.pid"), `${other.pid}`);
+
+      const done = dalzzack("uninstall", "--yes");
+      await sleep(500);
+      const survived = isAlive();
+      other.kill();
+      assert(survived, "uninstall ended another process");
+      assert(
+        done.left.some((entry) => entry.item === "daemon old"),
+        "The report should name the daemon with no identity",
+      );
+      assert(done.status === "completed", `Expected completed, got ${done.status}`);
+      assert(readFileSync(claude, "utf8") === "# Mine\n", "The user's text should stay");
+      assert(!existsSync(codex), "The guide that only install made should go");
+      if (platform() !== "win32") {
+        assert(readFileSync(zshenv, "utf8") === "alias a=b\n", "The PATH lines should go");
+      }
+      // Windows deletes the running binary after the process ends.
+      for (let i = 0; i < 40 && (existsSync(exe) || existsSync(exe + ".old")); i++) await sleep(250);
+      assert(!existsSync(exe), "The binary should go");
+      assert(!existsSync(exe + ".old"), "The renamed binary should go");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+
+  async "kill-real-daemon"() {
+    run(`start --id ${INSTANCE_ID}`);
+    await sleep(2000);
+    const result = run(`kill --id ${INSTANCE_ID}`);
+    assert(result.parsed?.status === "killed", `Expected killed, got: ${result.output}`);
+    assert(!run("list").output.includes(INSTANCE_ID), "The daemon should be gone");
+  },
+
+  // A pid file can outlive its daemon. The pid then belongs to another program,
+  // and only the process that wrote the file may be killed.
+  async "kill-spares-another-process"() {
+    const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    const id = `stale-${Date.now()}`;
+    const portFile = join(tmpdir(), `dalzzack-${id}.port`);
+    const pidFile = join(tmpdir(), `dalzzack-${id}.pid`);
+    const isAlive = () => {
+      try {
+        process.kill(other.pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      await sleep(300);
+      for (const record of [`${other.pid}\nanother process\n`, `${other.pid}`]) {
+        writeFileSync(portFile, "1");
+        writeFileSync(pidFile, record);
+        run(`kill --id ${id}`, { expectFail: true });
+        await sleep(500);
+        assert(isAlive(), `kill ended another process, with the pid file ${JSON.stringify(record)}`);
+      }
+    } finally {
+      other.kill();
+      cleanup([portFile, pidFile]);
     }
   },
 

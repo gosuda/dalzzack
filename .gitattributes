@@ -1,0 +1,3 @@
+# Compiled into the binary and compared in a test, so they stay LF on Windows too.
+AGENTS.md text eol=lf
+src-tauri/guide/*.md text eol=lf

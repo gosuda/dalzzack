@@ -31,6 +31,7 @@ dalzzack --help
 | Install to PATH | `npm run deploy` (or `cd src-tauri && cargo install --path .`) |
 | Run unit tests | `cd src-tauri && cargo test --lib --bins` |
 | Run smoke test (real browser) | `bash scripts/smoke.sh` |
+| Check a published release | `sh scripts/verify-release.sh <tag>`, or `pwsh -File scripts/verify-release.ps1 <tag>` |
 | Lint | `cd src-tauri && cargo clippy --all-targets -- -D warnings` |
 | Format | `cd src-tauri && cargo fmt` |
 
@@ -50,6 +51,10 @@ A tool needs three things, all in `src-tauri/src/`:
    - A `ToolDefinition { name, description, input_schema }` entry in `get_tool_definitions()`.
 
 The `dalzzack tools` command will surface drift between dispatcher and schema. Run it after any change in this area and confirm the new tool appears.
+
+Document a new command in `docs/commands.md` and in the topic file that fits in `src-tauri/guide/`. The installed guide, `src-tauri/guide/core.md`, stays under 4 KB, because every agent session pays for it: add to it only what most sessions need.
+
+If a tool prints fields that most calls do not need, add a short form in `src/cli/brief.rs`. Keep a failure whole, and keep any field that explains a problem.
 
 **Description guidance for LLM consumers.** Tool descriptions are read by AI agents, not humans. Be specific, lead with the verb, cross-link related tools ("prefer X over Y when…"), and call out non-obvious behaviour (e.g. "iframes resolved via CDP", "fields cleared first").
 
@@ -93,6 +98,6 @@ Use GitHub Issues. Include:
 - OS and OS version
 - Steps to reproduce, including the exact CLI command
 - What you expected vs what happened
-- Daemon log if relevant (logs are at `~/.cargo/bin/logs/dalzzack_<id>_<date>.log` by default on a `npm run deploy` install)
+- Daemon log if relevant (logs are at `%LOCALAPPDATA%\dalzzack\logs\dalzzack_<id>_<date>.log` on Windows and `~/Library/Application Support/dalzzack/logs/` on macOS)
 
 Security issues go to the channel listed in [SECURITY.md](SECURITY.md) instead.

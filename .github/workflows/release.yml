@@ -15,6 +15,25 @@ jobs:
     name: Create release
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      # `dalzzack upgrade` compares the tag with the version in the binary. If they
+      # differ, every run would offer the same update again.
+      - name: Check that the tag matches the version files
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # A release candidate carries the version of the release it leads to.
+          want="${TAG#v}"
+          want="${want%%-*}"
+          for found in \
+            "$(jq -r .version package.json)" \
+            "$(jq -r .version src-tauri/tauri.conf.json)" \
+            "$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)"; do
+            if [ "$found" != "$want" ]; then
+              echo "::error::The tag says $want, but a version file says $found."
+              exit 1
+            fi
+          done
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -29,7 +48,9 @@ jobs:
           # `releases/latest/download/...` skips, so the README links never point at it.
           flags=()
           if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+          # A draft: `releases/latest` must keep the last complete release until the
+          # build jobs have attached this one's files. The publish job ends the draft.
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
             --title "dalzzack $TAG" --notes "$NOTES" "${flags[@]}"
 
   build:
@@ -91,3 +112,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$GITHUB_REF_NAME" "${{ matrix.asset }}" "${{ matrix.asset }}.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Runs only when every build job passed, so a failed build leaves a draft that
+  # nobody can download.
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false

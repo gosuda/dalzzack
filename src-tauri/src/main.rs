@@ -9,6 +9,9 @@
 // A GUI-only build would need it; we use the console subsystem instead.
 
 use clap::{Parser, Subcommand};
+use dalzzack_lib::guide_file::{codex_home, global_files, with_docs, BLOCK_BEGIN, BLOCK_END};
+use dalzzack_lib::state::home_dir;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -38,6 +41,21 @@ struct Args {
     /// With --field / --jq: print string results without JSON quotes (like `jq -r`).
     #[arg(long, global = true)]
     raw: bool,
+    /// Print indented JSON. This is the default in a terminal; a pipe gets compact JSON.
+    #[arg(long, global = true)]
+    pretty: bool,
+    /// Print the complete result. This is the default in a terminal; a pipe gets a
+    /// short form, unless DALZZACK_OUTPUT=full is set. On `get-frames`, also print
+    /// complete `name` attributes: by default they are cut at 200 chars
+    /// (`name_len`/`name_truncated` mark the cut), because SafeFrame ad slots carry
+    /// multi-KB JSON in `name`.
+    #[arg(long, global = true)]
+    full: bool,
+    /// Save output larger than N bytes to a file and print a summary. 0 turns this
+    /// off. The default is 16384 in a pipe, and no limit in a terminal or with --full.
+    /// A failure and the output of --field or --jq are always printed whole.
+    #[arg(long, global = true, value_name = "N")]
+    max_output: Option<usize>,
 }
 
 #[derive(Subcommand)]
@@ -588,10 +606,28 @@ enum Cli {
         /// CSS selector (default: full page)
         #[arg(long)]
         selector: Option<String>,
-        /// Strip script/style/svg/comment noise (default: true)
-        #[arg(long, default_value = "true")]
+        /// Keep script/style/svg/comment noise. Stripping is the default.
+        #[arg(long)]
+        no_strip_noise: bool,
+        /// Stripping is the default, so this flag changes nothing.
+        #[arg(long, hide = true, conflicts_with = "no_strip_noise")]
         strip_noise: bool,
         /// Max output length in chars
+        #[arg(long)]
+        max_length: Option<u64>,
+    },
+
+    /// Get the visible text of the page or one element. This is the cheapest way
+    /// to read a page.
+    #[command(name = "get-text")]
+    GetText {
+        /// Instance ID
+        #[arg(long, short, default_value = "")]
+        id: String,
+        /// CSS selector (default: full page)
+        #[arg(long)]
+        selector: Option<String>,
+        /// Cut the text to N bytes
         #[arg(long)]
         max_length: Option<u64>,
     },
@@ -831,11 +867,6 @@ enum Cli {
         /// Instance ID
         #[arg(long, short, default_value = "")]
         id: String,
-        /// Return complete `name` attributes. By default names are truncated to
-        /// 200 chars (`name_len`/`name_truncated` mark the cut) — SafeFrame ad
-        /// slots carry multi-KB JSON in `name`.
-        #[arg(long)]
-        full: bool,
     },
 
     /// Get iframe HTML content (supports cross-origin via CDP)
@@ -1118,51 +1149,100 @@ enum Cli {
 
     /// Print the JSON schema for every tool the daemon exposes.
     /// Use this so an LLM (or MCP client) can discover the available
-    /// tool surface without hardcoding names.
-    Tools,
+    /// tool surface without hardcoding names. The whole list is 64 KB:
+    /// use --names, then ask for one tool.
+    Tools {
+        /// Print one tool, such as `get_html` or `get-html`
+        name: Option<String>,
+        /// Print the tool names only
+        #[arg(long, conflicts_with = "name")]
+        names: bool,
+    },
 
-    /// Upgrade dalzzack in place via `cargo install`.
-    /// Stops any running daemons first so they pick up the new code.
-    /// Default source is the repository URL baked into the binary at build time.
-    /// Needs cargo; without it, prints the download link of the prebuilt binary.
+    /// Check the latest release and replace this binary if it is older.
+    /// Stops running daemons so they pick up the new version, then refreshes the
+    /// installed guides. --path, --git, --rev, and --no-locked build from source
+    /// with cargo instead.
+    #[command(visible_alias = "update")]
     Upgrade {
-        /// Use `cargo install --path <PATH>` instead of `--git <URL>`.
-        /// Handy when you're hacking on the repo locally — point this at the
-        /// repo root or `src-tauri/`.
+        /// Print the current and latest versions. Change nothing.
+        #[arg(long, conflicts_with_all = ["force", "tag", "path", "git", "rev", "no_locked"])]
+        check: bool,
+        /// Install the release even if this version is the same.
+        #[arg(long, conflicts_with_all = ["path", "git", "rev", "no_locked"])]
+        force: bool,
+        /// Install this release tag and not the latest: a release candidate or a rollback.
+        #[arg(long, conflicts_with_all = ["path", "git", "rev", "no_locked"])]
+        tag: Option<String>,
+        /// Build from this folder with `cargo install --path`: the `src-tauri`
+        /// folder of a clone.
         #[arg(long)]
         path: Option<PathBuf>,
-        /// Override the git URL (defaults to the repository URL compiled into the binary).
+        /// Build from this repository with `cargo install --git`.
         #[arg(long)]
         git: Option<String>,
-        /// Git revision (branch / tag / sha) to install from. Only used with --git or the baked-in URL.
+        /// Git revision (branch / tag / sha) to build. Uses --git or this project's repository.
         #[arg(long)]
         rev: Option<String>,
         /// Don't try to stop running daemons — fail if any are alive.
         #[arg(long)]
         keep_daemons: bool,
-        /// Skip the `--locked` flag passed to cargo install.
+        /// Build from source without the `--locked` flag of cargo install.
         #[arg(long)]
         no_locked: bool,
     },
 
-    /// Run batch steps from a JSON file (self-contained: starts browser, runs, exits)
+    /// Undo the install: stop daemons, then remove the guides, the PATH entry, and
+    /// this binary. Without --yes this prints the plan and changes nothing.
+    Uninstall {
+        /// Apply the plan.
+        #[arg(long)]
+        yes: bool,
+        /// Also delete the data folders: screenshots, logs, and browser logins.
+        #[arg(long)]
+        purge: bool,
+        /// Remove the guide from ./AGENTS.md and nothing else. Run this in each
+        /// project before the full uninstall.
+        #[arg(long, conflicts_with = "purge")]
+        project: bool,
+    },
+
+    /// Run several steps in one call. With the id of a live instance, the steps run
+    /// there and one result is printed. Otherwise this starts a browser, runs the
+    /// steps, prints one line per step, and exits. A failed step stops the run.
     Run {
         /// Instance ID (auto-generates if omitted)
         #[arg(long, short)]
         id: Option<String>,
-        /// Path to JSON steps file
+        /// JSON steps file, or - for stdin: a list of commands such as
+        /// [["click", "--text", "OK"], ["wait-for", "--selector", ".done"]], or
+        /// {"steps": [{"tool": "click_element", "args": {"text": "OK"}}]}
         #[arg(long)]
         steps: PathBuf,
+    },
+
+    /// Print a part of the usage guide. With no topic, list the topics.
+    Guide {
+        /// The topic to print
+        topic: Option<String>,
+        /// Print every topic
+        #[arg(long, conflicts_with = "topic")]
+        all: bool,
     },
 
     /// Inject dalzzack usage docs into AI agent config files.
     /// claude-code → ~/.claude/CLAUDE.md (global, all projects)
     /// codex → ~/.codex/AGENTS.md or $CODEX_HOME/AGENTS.md (global, all projects)
-    /// codex-project → ./AGENTS.md (current project; Codex reads only its first 32 KiB)
+    /// codex-project → ./AGENTS.md (current project)
     /// all → claude-code + codex
     Install {
         /// Target agent: claude-code, codex, codex-project, or all
-        target: String,
+        #[arg(required_unless_present = "refresh")]
+        target: Option<String>,
+        /// Rewrite the guide only in global files that already have it.
+        /// This creates no file.
+        #[arg(long, conflicts_with = "target")]
+        refresh: bool,
     },
 
     /// Capture a chrome-tracing-compatible timeline for `duration_ms`. Windows uses real
@@ -1351,14 +1431,29 @@ fn parse_engine_or_exit(raw: &str) -> dalzzack_lib::engine::Engine {
 /// `--field result` on a failure would otherwise print `null` with exit 0,
 /// which reads as "the script returned null". `--jq` sees everything — it is
 /// the tool for handling failures yourself.
-fn emit(v: &serde_json::Value, filter: &dalzzack_lib::cli::output::OutputFilter) -> i32 {
+/// Print a result. `tool` and `args` say which short form applies.
+fn emit(
+    v: &serde_json::Value,
+    filter: &dalzzack_lib::cli::output::OutputFilter,
+    tool: &str,
+    args: &serde_json::Value,
+) -> i32 {
+    use dalzzack_lib::cli::{
+        brief::brief,
+        output::{limited, show},
+    };
     if !filter.is_active() {
-        println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+        let text = if filter.full {
+            show(v, filter)
+        } else {
+            show(&brief(tool, args, v), filter)
+        };
+        println!("{}", limited(text, v, tool, args, filter));
         return 0;
     }
     let failed = v.get("status").and_then(|s| s.as_str()) == Some("failed");
     if !filter.fields.is_empty() && failed {
-        println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+        println!("{}", show(v, filter));
         eprintln!("(result is a failure — printed whole instead of --field)");
         return 1;
     }
@@ -1398,13 +1493,13 @@ fn emit_result(
     filter: &dalzzack_lib::cli::output::OutputFilter,
 ) -> ! {
     match r {
-        Ok(v) => std::process::exit(emit(&v, filter)),
+        Ok(v) => std::process::exit(emit(&v, filter, "", &serde_json::Value::Null)),
         Err(e) => {
             // Unfiltered, failures keep their long-standing place on stderr.
             // A filter promises "the whole failure, on stdout, exit 1" — a
             // runner that asked for one field reads stdout only.
             if filter.is_active() {
-                println!("{}", serde_json::to_string_pretty(&e).unwrap_or_default());
+                println!("{}", dalzzack_lib::cli::output::show(&e, filter));
             } else {
                 eprintln!("{e}");
             }
@@ -1413,10 +1508,16 @@ fn emit_result(
     }
 }
 
+/// The first line of a clap error, which says what is wrong.
+fn usage_message(e: &clap::Error) -> String {
+    let text = e.render().to_string();
+    text.lines().next().unwrap_or("invalid usage").to_string()
+}
+
 fn main() {
     // Usage errors must reach stdout too: clap prints them to stderr and a
     // runner with `2>/dev/null` sees a successful-looking empty result.
-    let (cli, filter) = match Args::try_parse() {
+    let (cli, filter, full_flag) = match Args::try_parse() {
         // clap's `conflicts_with` is not enforced when the two global flags
         // sit on opposite sides of the subcommand (`--field x tools --jq .`),
         // and one would then be silently ignored.
@@ -1431,32 +1532,39 @@ fn main() {
             );
             std::process::exit(2);
         }
-        Ok(a) => (
-            a.cmd,
-            dalzzack_lib::cli::output::OutputFilter {
-                fields: a.field,
-                jq: a.jq,
-                raw: a.raw,
-            },
-        ),
+        Ok(a) => {
+            let terminal = std::io::stdout().is_terminal();
+            let full_env = std::env::var_os("DALZZACK_OUTPUT").is_some_and(|v| v == "full");
+            let full = a.full || terminal || full_env;
+            (
+                a.cmd,
+                dalzzack_lib::cli::output::OutputFilter {
+                    fields: a.field,
+                    jq: a.jq,
+                    raw: a.raw,
+                    pretty: a.pretty || terminal,
+                    full,
+                    max_output: match a.max_output {
+                        Some(0) => None,
+                        Some(limit) => Some(limit),
+                        None if full => None,
+                        None => Some(dalzzack_lib::cli::output::DEFAULT_MAX_OUTPUT),
+                    },
+                },
+                a.full,
+            )
+        }
         Err(e) => {
             use clap::error::ErrorKind;
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
                 e.exit();
             }
-            let first_line = e
-                .render()
-                .to_string()
-                .lines()
-                .next()
-                .unwrap_or("invalid usage")
-                .to_string();
             println!(
                 "{}",
                 serde_json::json!({
                     "status": "failed",
                     "error": "USAGE",
-                    "message": first_line,
+                    "message": usage_message(&e),
                 })
             );
             // Full clap rendering still goes to stderr for humans.
@@ -1466,14 +1574,14 @@ fn main() {
 
     // A previous `upgrade` may have left its own (then-running) image behind
     // as `dalzzack.exe.old`; this is the first moment it can be deleted.
-    sweep_moved_aside();
+    dalzzack_lib::upgrade::sweep_moved_aside();
 
     // These print progress or several documents; a filter has nothing single
     // to apply to, and silently ignoring it would be worse than saying so.
     if filter.is_active()
         && matches!(
             cli,
-            Cli::Run { .. } | Cli::Install { .. } | Cli::Upgrade { .. } | Cli::Daemon { .. }
+            Cli::Run { .. } | Cli::Guide { .. } | Cli::Install { .. } | Cli::Daemon { .. }
         )
     {
         println!(
@@ -1482,7 +1590,7 @@ fn main() {
                 "status": "failed",
                 "error": "USAGE",
                 "message": "--field/--jq apply to commands that print one JSON document; run, \
-                            install, upgrade and daemon print several",
+                            guide, install and daemon do not",
             })
         );
         std::process::exit(2);
@@ -1561,7 +1669,8 @@ fn main() {
             );
         }
         Cli::List => {
-            std::process::exit(emit(&dalzzack_lib::daemon::list_instances_json(), &filter));
+            let instances = dalzzack_lib::daemon::list_instances_json();
+            std::process::exit(emit(&instances, &filter, "list", &serde_json::Value::Null));
         }
         Cli::Daemon {
             id,
@@ -1614,32 +1723,91 @@ fn main() {
             );
         }
         Cli::Run { id, steps } => {
-            let instance_id = id.unwrap_or_else(|| format!("run-{}", std::process::id()));
-            dalzzack_lib::cli::run_steps(&instance_id, &steps);
+            let steps = load_steps(&steps).unwrap_or_else(|message| {
+                println!(
+                    "{}",
+                    serde_json::json!({ "status": "failed", "error": "USAGE", "message": message })
+                );
+                std::process::exit(2);
+            });
+            let live = id
+                .as_deref()
+                .filter(|id| dalzzack_lib::daemon::ping_info(id).is_some());
+            match live {
+                Some(id) => std::process::exit(run_on_instance(id, steps, &filter)),
+                None => {
+                    let instance_id = id.unwrap_or_else(|| format!("run-{}", std::process::id()));
+                    dalzzack_lib::cli::run_steps(&instance_id, steps);
+                }
+            }
         }
-        Cli::Install { target } => {
-            install_docs(&target);
-        }
-        Cli::Tools => {
+        Cli::Guide { topic, all } => print_guide(topic.as_deref(), all),
+        Cli::Install { target, refresh } => match target {
+            Some(target) if !refresh => install_docs(&target),
+            _ => refresh_docs(),
+        },
+        Cli::Tools { name, names } => {
             let defs = dalzzack_lib::tools::definitions::get_tool_definitions();
-            let v = serde_json::to_value(&defs).unwrap_or_else(|_| serde_json::json!([]));
-            std::process::exit(emit(&v, &filter));
+            let v = tools_output(&defs, name.as_deref(), names);
+            std::process::exit(emit(&v, &filter, "", &serde_json::Value::Null));
         }
         Cli::Upgrade {
+            check,
+            force,
+            tag,
             path,
             git,
             rev,
             keep_daemons,
             no_locked,
         } => {
-            upgrade(path, git, rev, keep_daemons, no_locked);
+            let (report, code) = match dalzzack_lib::upgrade::run(dalzzack_lib::upgrade::Options {
+                check,
+                force,
+                tag,
+                keep_daemons,
+                path,
+                git,
+                rev,
+                no_locked,
+            }) {
+                Ok(report) => (report, 0),
+                Err(report) => (report, 1),
+            };
+            emit(&report, &filter, "", &serde_json::Value::Null);
+            std::process::exit(code);
+        }
+        Cli::Uninstall {
+            yes,
+            purge,
+            project,
+        } => {
+            let options = dalzzack_lib::uninstall::Options {
+                yes,
+                purge,
+                project,
+            };
+            let (report, code) = match dalzzack_lib::uninstall::run(options) {
+                Ok(report) => (report, 0),
+                Err(report) => (report, 1),
+            };
+            // Never through the output limit: that writes to the data folder.
+            if filter.is_active() {
+                emit(&report, &filter, "", &serde_json::Value::Null);
+            } else {
+                println!("{}", dalzzack_lib::cli::output::show(&report, &filter));
+            }
+            std::process::exit(code);
         }
         // All tool commands → send to daemon via socket
         cmd => {
-            let (id, tool_name, args) = cli_to_tool_call(cmd);
+            let (id, tool_name, mut args) = cli_to_tool_call(cmd);
+            if full_flag && tool_name == "get_frame_list" {
+                args["full"] = serde_json::json!(true);
+            }
             let id = resolve_instance_id(id);
             let pathconv = shell_pathconv_suspects(&args);
-            let result = dalzzack_lib::daemon::send_command(&id, &tool_name, args);
+            let result = dalzzack_lib::daemon::send_command(&id, &tool_name, args.clone());
             match result {
                 Ok(mut output) => {
                     // Git-Bash (MSYS2) rewrites any argv starting with `/` into a
@@ -1661,7 +1829,7 @@ fn main() {
                             );
                         }
                     }
-                    std::process::exit(emit(&output, &filter));
+                    std::process::exit(emit(&output, &filter, &tool_name, &args));
                 }
                 Err(e) => {
                     eprintln!(
@@ -1672,6 +1840,118 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+/// All steps of a steps file. They are read first, so that a mistake in the last
+/// one does not leave the first ones done.
+fn load_steps(path: &std::path::Path) -> Result<Vec<dalzzack_lib::cli::Step>, String> {
+    match dalzzack_lib::cli::read_steps(path)? {
+        serde_json::Value::Array(lines) => lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| command_step(line).map_err(|e| format!("step {}: {e}", i + 1)))
+            .collect(),
+        document => dalzzack_lib::cli::object_steps(document),
+    }
+}
+
+/// One `["click", "--text", "OK"]` step, read with the CLI's own definitions.
+fn command_step(line: &serde_json::Value) -> Result<dalzzack_lib::cli::Step, String> {
+    let words: Option<Vec<&str>> = line
+        .as_array()
+        .map(|words| words.iter().map(|word| word.as_str()).collect())
+        .unwrap_or_default();
+    let words = words.ok_or("expected a list of strings")?;
+    let parsed = Args::try_parse_from(std::iter::once("dalzzack").chain(words))
+        .map_err(|e| usage_message(&e))?;
+    if matches!(
+        parsed.cmd,
+        Cli::Start { .. }
+            | Cli::Stop { .. }
+            | Cli::Kill { .. }
+            | Cli::List
+            | Cli::Daemon { .. }
+            | Cli::Run { .. }
+            | Cli::Guide { .. }
+            | Cli::Install { .. }
+            | Cli::Tools { .. }
+            | Cli::Upgrade { .. }
+            | Cli::Uninstall { .. }
+    ) {
+        return Err("only commands that act on a page can be a step".to_string());
+    }
+    let (id, tool, args) = cli_to_tool_call(parsed.cmd);
+    if !id.is_empty() {
+        return Err("a step cannot name an instance: `run --id` chooses it".to_string());
+    }
+    Ok(dalzzack_lib::cli::Step {
+        tool,
+        args: Some(args),
+    })
+}
+
+/// Run steps on a live instance and print one result: the last step's, or the
+/// failed step's. Returns the exit code.
+fn run_on_instance(
+    id: &str,
+    steps: Vec<dalzzack_lib::cli::Step>,
+    filter: &dalzzack_lib::cli::output::OutputFilter,
+) -> i32 {
+    let total = steps.len();
+    let mut last = serde_json::Value::Null;
+    for (i, step) in steps.into_iter().enumerate() {
+        let args = step.args.unwrap_or_else(|| serde_json::json!({}));
+        let result = dalzzack_lib::daemon::send_command(id, &step.tool, args.clone())
+            .unwrap_or_else(|e| serde_json::json!({ "status": "failed", "error": e.to_string() }));
+        if result["status"] == "failed" {
+            let failed = serde_json::json!({
+                "status": "failed",
+                "steps_run": i + 1,
+                "steps_total": total,
+                "failed_step": i + 1,
+                "tool": step.tool,
+                "result": result,
+            });
+            emit(&failed, filter, "", &serde_json::Value::Null);
+            return 1;
+        }
+        last = if filter.full {
+            result
+        } else {
+            dalzzack_lib::cli::brief::brief(&step.tool, &args, &result)
+        };
+    }
+    let done = serde_json::json!({
+        "status": "completed",
+        "steps_run": total,
+        "steps_total": total,
+        "last": last,
+    });
+    emit(&done, filter, "", &serde_json::Value::Null)
+}
+
+/// `tools`: all schemas, the names only, or one tool. A CLI spelling with
+/// hyphens finds the same tool.
+fn tools_output(
+    defs: &[dalzzack_lib::tools::definitions::ToolDefinition],
+    name: Option<&str>,
+    names_only: bool,
+) -> serde_json::Value {
+    if names_only {
+        return serde_json::json!(defs.iter().map(|d| &d.name).collect::<Vec<_>>());
+    }
+    let Some(name) = name else {
+        return serde_json::json!(defs);
+    };
+    let wanted = name.replace('-', "_");
+    match defs.iter().find(|d| d.name == wanted) {
+        Some(def) => serde_json::json!(def),
+        None => serde_json::json!({
+            "status": "failed",
+            "error": "UNKNOWN_TOOL",
+            "message": format!("No tool is named {name}. `dalzzack tools --names` lists them."),
+        }),
     }
 }
 
@@ -1813,6 +2093,7 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
         Cli::GetHtml {
             id,
             selector,
+            no_strip_noise,
             strip_noise,
             max_length,
         } => (
@@ -1820,9 +2101,18 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
             "get_html".into(),
             serde_json::json!({
                 "selector": selector,
-                "strip_noise": strip_noise,
+                "strip_noise": strip_noise || !no_strip_noise,
                 "max_length": max_length,
             }),
+        ),
+        Cli::GetText {
+            id,
+            selector,
+            max_length,
+        } => (
+            id,
+            "get_text".into(),
+            serde_json::json!({ "selector": selector, "max_length": max_length }),
         ),
         Cli::GetUrl { id } => (id, "get_current_url".into(), serde_json::json!({})),
         Cli::WaitFor {
@@ -1957,11 +2247,7 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
             "inject_clear".into(),
             serde_json::json!({ "name": name }),
         ),
-        Cli::GetFrames { id, full } => (
-            id,
-            "get_frame_list".into(),
-            serde_json::json!({ "full": full }),
-        ),
+        Cli::GetFrames { id } => (id, "get_frame_list".into(), serde_json::json!({})),
         Cli::GetFrameHtml {
             id,
             selector,
@@ -2332,274 +2618,106 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
         | Cli::List
         | Cli::Daemon { .. }
         | Cli::Run { .. }
+        | Cli::Guide { .. }
         | Cli::Install { .. }
-        | Cli::Tools
-        | Cli::Upgrade { .. } => {
+        | Cli::Tools { .. }
+        | Cli::Upgrade { .. }
+        | Cli::Uninstall { .. } => {
             unreachable!("handled in main()")
         }
     }
 }
 
-const DALZZACK_DOCS: &str = r##"<!-- dalzzack-begin -->
-## Browser Automation (dalzzack)
+/// The parts of the guide that `install` leaves out, so that an agent pays for
+/// them only when it needs them: name, what it covers, text.
+const GUIDE_TOPICS: [(&str, &str, &str); 11] = [
+    (
+        "instance",
+        "start, stop, list, reset, resize, upgrade, install",
+        include_str!("../guide/instance.md"),
+    ),
+    (
+        "navigate",
+        "navigate, reload, get-text, get-html, and whether a page really loaded",
+        include_str!("../guide/navigate.md"),
+    ),
+    (
+        "interact",
+        "click, hover, fill-form, keyboard, scroll, upload-file, save-image",
+        include_str!("../guide/interact.md"),
+    ),
+    (
+        "inspect",
+        "describe, wait-for, nav-log, failed-requests, response-headers, console-logs, cookies",
+        include_str!("../guide/inspect.md"),
+    ),
+    (
+        "advanced",
+        "exec-js, service workers, get-requests, frames, run",
+        include_str!("../guide/advanced.md"),
+    ),
+    (
+        "intercept",
+        "make requests hang, wait, fail, or return a mock",
+        include_str!("../guide/intercept.md"),
+    ),
+    (
+        "inject",
+        "run a script before the page's own code",
+        include_str!("../guide/inject.md"),
+    ),
+    (
+        "diagnostics",
+        "what to do when a page or a command hangs",
+        include_str!("../guide/diagnostics.md"),
+    ),
+    (
+        "chrome",
+        "drive a real Google Chrome with --engine chrome",
+        include_str!("../guide/chrome.md"),
+    ),
+    (
+        "output",
+        "--field, --jq, --full, --max-output, and where files go",
+        include_str!("../guide/output.md"),
+    ),
+    (
+        "rules",
+        "every usage rule",
+        include_str!("../guide/rules.md"),
+    ),
+];
 
-`dalzzack` is a browser automation CLI. It spawns a real browser window and controls it via commands.
-
-### Workflow
-
-```bash
-dalzzack start --id b --width 1920 --height 1080                # FIRST TIME ONLY: start at this size
-dalzzack list                                                   # check what's already running
-dalzzack resize --id b --width 800 --height 600                 # ALREADY RUNNING: change size at runtime
-dalzzack navigate -i b --url "https://example.com"              # open page
-dalzzack describe -i b                                          # annotated screenshot + element list
-dalzzack hover -i b --selector ".menu-trigger"                  # reveal a hover-only dropdown (macOS native :hover)
-dalzzack click -i b --selector "button.submit"                  # click by CSS selector
-dalzzack click -i b --text "Sign In"                            # click by visible text
-dalzzack fill-form -i b --selector "#email" --value "test"      # fill single field
-dalzzack wait-for -i b --selector ".result" --state added       # wait for new content
-dalzzack console-logs -i b --level error                        # check for JS errors when something misbehaves
-dalzzack back -i b                                              # history.back() with URL poll
-dalzzack scroll -i b --to bottom --selector ".container"        # scroll to bottom
-dalzzack save-image -i b --selector "img" --index -1 --output result.png  # save last image
-dalzzack screenshot -i b                                        # quick visual check
-dalzzack stop --id b                                            # graceful stop (use `kill --id b` if hung)
-```
-
-### Did the page really load? What failed? (always on — no `--record`)
-
-```bash
-dalzzack navigate -i b --url "https://site.example" --field document  # main document: status, every hop, challenge
-dalzzack nav-log -i b                                           # every document chain: 302s, 403 cf-mitigated, reloads
-dalzzack failed-requests -i b                                   # failed script/image/fetch/… WITH the URL
-dalzzack cookies -i b                                           # cookie jar incl. HttpOnly + parent domains
-dalzzack start --id c --engine chrome                           # a REAL Chrome (what Chrome sees, not WebView2)
-dalzzack reset -i c                                             # first-visit state, same id (private/chrome profiles)
-```
-
-### When something hangs
-
-If a tool times out or `navigate` never returns, the renderer is wedged. Diagnose from the outside instead of retrying:
-
-```bash
-dalzzack pause -i b                                             # WHERE is the renderer stuck right now?
-dalzzack network-log -i b --since-ms 30000                      # any requests still pending?
-dalzzack console-dump -i b --level error                        # any uncaught errors before the freeze?
-dalzzack dump-recording -i b --filter network                   # (if started with --record) full event tape, hang-resistant
-dalzzack kill --id b                                            # last resort: force-terminate the daemon
-```
-
-For investigations where you'll likely need to look at network/console events AFTER a freeze
-(e.g. "which request stalled?"), start the daemon with `--record` (or `record on` on a live one —
-events from before that moment are not on the tape). That subscribes to
-browser-process events up front and buffers them in daemon memory — `dump-recording` then reads
-the buffer directly, so it works even when every JS-/CDP-based tool would time out.
-
-```bash
-dalzzack start --id b --record                                  # arm capture BEFORE navigation
-dalzzack navigate -i b --url "https://flaky-spa.example"
-# … page freezes …
-dalzzack dump-recording -i b --output /tmp/tape.json            # daemon-memory read, hang-resistant
-```
-
-### Window Sizing — when to use `start --width` vs `resize`
-
-| Situation | Command |
-|-----------|---------|
-| First launch, want a non-default size | `start --id b --width 1920 --height 1080` |
-| Daemon already running, need different size | `resize --id b --width 800 --height 600` |
-| Want viewport size for responsive testing mid-session | `resize --id b --width 375 --height 812` |
-| Re-run `start` on an existing id | **Does NOT resize** — returns `already_running`. Use `resize`. |
-
-`start --width/--height` is **initial size only** and is ignored on subsequent `start` calls for the same id (the daemon is already up). To change a live window, always use `resize`. Run `dalzzack list` first if you're unsure whether an id is alive.
-
-### All Commands
-
-**Instance:**
-- `start [--id ID] [--width PX] [--height PX] [--record] [--watch-hang] [--auto-dump-dir DIR] [--browser-arg FLAG] [--no-console-capture] [--console-capture] [--user-agent UA] [--raw-user-agent] [--enforce-csp] [--private-profile] [--engine webview|chrome] [--chrome-path PATH]` — start browser (default 1200x800; window is resizable). If the id already has an unresponsive daemon, auto-kills and respawns.
-  - `--record` arms always-on background event capture (network/console/exceptions) so `dump-recording` works even when the renderer is wedged.
-  - `--no-console-capture` collects no console output at all — no CDP subscription, no in-page hook. Rarely needed on Windows, where capture is already invisible to the page (see `console-logs`). `console-logs` then reports `console_transport: "disabled"` instead of an empty buffer.
-  - `--console-capture` (**macOS only**) turns console capture ON, accepting that the page can see it. macOS has no invisible transport: WebKit's system-console setting makes WebKit stringify every logged argument twice, and `disable-devtool` counts those `toString` calls — two instead of one reads as "DevTools is open" and protected sites redirect away. So macOS captures nothing by default and `console-logs` reports `unavailable` with the reason. This flag installs the in-page hook instead, reported as `in_page_fallback`.
-  - `--user-agent UA` overrides the User-Agent. Unlike `--browser-arg "--user-agent=…"` this needs no private user data folder, so cookies/logins stay shared. **The engine generates its own `Sec-CH-UA` headers and you cannot override those** — a UA whose major version disagrees with the engine is a *stronger* bot signal than the default. On Windows, WebView2 already sends Edge branding at the live runtime version, so the default is left alone; passing this flag also injects a matching `navigator.userAgentData` so the three agree.
-  - `--enforce-csp` keeps the page's Content Security Policy **enforced**. dalzzack disables it by default (CDP `Page.setBypassCSP`) so cross-origin iframes can be inspected — which also means **nothing is ever blocked, so no violation can ever be reported** and `console-logs --source csp` stays empty regardless of the policy. Use this whenever the question *is* the policy; `list` reports `csp_bypassed`.
-  - `--raw-user-agent` keeps the engine's own UA even where the default is a giveaway. macOS only in practice: the WKWebView default ends at `(KHTML, like Gecko)` with no browser product token — a plain embedded-browser signature — and is completed with the installed Safari's version by default.
-  - `--watch-hang` runs a daemon-side watchdog (500 ms ping × 5 timeouts ⇒ "hang"). On hang, auto-dumps the recording buffer + a `hang.json` marker to `--auto-dump-dir` (default `<temp>/dalzzack-hangs`). Lets you walk away — post-mortem data is captured automatically.
-  - `--browser-arg FLAG` (repeatable, Windows) passes a Chromium flag to the WebView2 browser process, e.g. `--browser-arg "--enable-heap-profiling" --browser-arg "--js-flags=--stack-trace-limit=0"`. WebView2 reads these only at environment creation, so they can't be changed on a live daemon. Such an instance gets its **own WebView2 user data folder** (so it does not share cookies/logins with other ids): WebView2 permits only one set of browser arguments per folder, and a second environment with different ones fails outright.
-  - `--private-profile` gives the instance its **own browser profile** (cookies, storage, cache): empty at start, deleted by `stop`. Plain instances share ONE WebView2 profile — a login in one carries to the next, and `cookies clear` / `reset` in one would hit all of them — and every plain daemon started later — so on the shared profile those refuse with `SHARED_PROFILE` **even when no other daemon is running** (the profile outlives this one) unless `--force-shared`. `--dry-run` shows what they would delete.
-  - `--ttl 10m` (`90s`, `2h`, `1h30m`, bare seconds): the daemon stops itself through the same path as `stop` (Chrome and a private-profile folder go with it); `start`/`list` report `ttl_s`, `expires_at_ms`. For short-lived comparison instances.
-  - `--console-buffer N`: the console ring size (default 500, max 100000).
-  - `--engine chrome [--chrome-path PATH]` drives a **real Google Chrome** instead of WebView2 — see *Chrome engine* below.
-- `resize --id ID --width PX --height PX` — change size of an already-running daemon (min 100x100)
-- `list` — show running instances (pings each; cleans up stale port/pid files). Reports each daemon's `renderer_ok` (**can this daemon run JS at all?** — a webview that failed to attach makes every tool time out as if the page were wedged), `version`, `record`, `recording` (`on` | `off` | `never` — the tape state), `recording_armed` (the capture transport came up; stays true after `record off`), `watch_hang`, `console_transport`, `user_agent`/`user_agent_source` and `csp_bypassed` (**`true` means no CSP is enforced, so `console-logs --source csp` cannot report anything**) — check this FIRST when a tape or a console read is empty: a daemon started without `--record` records nothing, `console_transport: "unavailable"` means console capture never came up (empty ≠ quiet page), and `version: null` means a pre-0.9.0 binary is still running.
-  - Also `current_url` (the top document, from daemon memory — answers on a wedged renderer), `last_used` / `last_used_ms` / `last_tool` (tell an abandoned instance from one somebody is using), `started_at_ms`, `engine`, `browser_version`, `navigator_webdriver` (Chrome engine) and `profile` (`kind`: `shared` | `private` | `ephemeral`, plus its folder). Null on pre-0.18 daemons. From 0.19: `ttl_s` / `expires_at_ms` (`start --ttl`) and `console_buffer`.
-- `stop --id ID` — graceful stop via __shutdown over TCP
-- `kill --id ID` — force-kill by PID. Use when `stop` times out on a wedged daemon (bypasses TCP). On a Chrome-engine id it also ends Chrome (only if the recorded pid is still that same Chrome process — never a reused pid) and deletes its throw-away profile; on a `--private-profile` id it deletes that folder. `list` does the same for a Chrome-engine daemon whose process has died
-- `reset --id ID [--keep-browsing-data] [--keep-rules] [--force-shared] [--dry-run] [--url URL]` — back to a first-visit state **without** stopping: the id, port, window and start flags stay. Clears the profile's browsing data (cookies, cache, storage, IndexedDB, service workers — WebView2 `ClearBrowsingDataAll`; on `--engine chrome` a brand-new Chrome on a new empty profile), intercept rules, injected scripts and dalzzack's buffers (console, nav-log, failed-requests, response headers, tape contents), then opens `--url` (default about:blank). The page is left for about:blank BEFORE anything is cleared, so the old document's unload handlers cannot write back into the emptied profile. `--keep-rules` on Chrome re-registers the injected scripts in the new browser. `status: "partial"` + `failed_steps` if any step (or a nested rule clear) failed. Refuses on the shared profile (`SHARED_PROFILE`) — even with no other daemon running — unless `--force-shared` or `--keep-browsing-data`; `--dry-run` reports each step's scope, the cookies per domain it would delete and whether it would be refused, and touches nothing
-- `record on|off|status --id ID [--clear]` — switch the `--record` tape on a LIVE daemon. `on` captures from now (earlier events are not recoverable); `off` stops appending but keeps the tape readable by `dump-recording` (`--clear` drops it); `on` again resumes it, and `off_periods` lists the gaps. **Read `recording` (`on` | `off` | `never`) for the state** — `armed` only says the capture transport came up and stays `true` after `off`. Refused on a daemon whose startup capture self-test failed (a tape there would prove nothing); honours `--no-console-capture` (network events only)
-- `tools` — print JSON schemas for every tool (for MCP / LLM discovery)
-- `upgrade [--path DIR | --git URL] [--rev REV] [--keep-daemons] [--no-locked]` — self-update via `cargo install --force`. Stops running daemons first by default. Needs cargo: without it, it fails with `cargo_not_found` and a `download_url` for the prebuilt binary.
-
-**Navigate:**
-- `navigate --url URL [--timeout-ms 5000]` — also returns the page `title` and the **main document's** outcome: `document` (status, every redirect hop with its `location`/`cf-mitigated`/`server`/set-cookie names, `challenge`, whether it `committed`), `navigations_during_wait`, `later_navigations` and a `hint` — so a challenge that solves itself reads as "403 `cloudflare:challenge`, then a second navigation", not as a plain success. WebView engine: waits `--timeout-ms`; Chrome engine: returns at the top frame's `load` (`load_event_ms`), at most `--timeout-ms`
-- `back --id ID` / `forward --id ID` — `history.back/forward()` with URL poll (up to 3 s); returns `before_url`, `after_url`, `elapsed_ms`, `changed`
-- `reload --id ID [--hard]` — reload current page. `--hard` bypasses the HTTP cache (Windows: CDP `Page.reload {ignoreCache:true}`; macOS: `reloadFromOrigin`)
-- `clear-site-data --id ID [--origin URL] [--types LIST]` — wipe an origin's storage out-of-band: service worker registrations, CacheStorage, localStorage, IndexedDB, cookies. Runs outside the page's JS world, so it works when a proxy/membrane or a policy hides `navigator.serviceWorker`. `--origin` defaults to the current page. Types: `appcache,cache_storage,cookies,file_systems,indexeddb,local_storage,service_workers,shader_cache,websql` or `all`. **macOS caveat: clears by HOST, not origin — scheme and port are not distinguished.**
-- `get-url`, `get-html [--selector CSS] [--strip-noise] [--max-length N]`, `screenshot [--output PATH] [--selector CSS]` — with `--selector`, an element that is not fully visible is scrolled into view first (every engine captures only what is on screen)
-
-**Interact:**
-- `click --x X --y Y` | `click --selector CSS` | `click --text "..."` — click by coordinates, selector, or text
-- `hover --selector CSS` / `hover --x X --y Y` — move the cursor (macOS uses native CGEvent so CSS `:hover` fires; Windows/Linux dispatch JS events only and set `native_hover: false`; the Chrome engine moves Chrome's own pointer, `native_hover: true`). Use this for dropdown menus and tooltips.
-- `fill-form --selector CSS --value TEXT` — fill single field (shorthand)
-- `fill-form --fields '[{"selector":"#a","value":"1"}]'` — fill multiple fields (JSON)
-- `keyboard --text "hello"` | `keyboard --text "long" --paste` — type or paste text
-- `keyboard --key Enter [--modifiers ctrl,shift]` — press special keys
-- `scroll --to top|bottom [--selector CSS]` — absolute scroll
-- `scroll [--direction down] [--amount 500] [--selector CSS]` — relative scroll
-- `upload-file --selector "input[type=file]" --file PATH`
-- `save-image --selector CSS --output PATH [--index -1]` — save DOM image (default: last match)
-
-**Inspect:**
-- `describe [--output PATH]` — annotated screenshot with numbered elements + JSON
-- `check-visible --selector CSS` — instant visibility check
-- `element-at --x X --y Y` — find element at coordinates
-- `wait-for --selector CSS [--state present|added|removed] [--text "..."] [--timeout-ms 10000]`
-- `wait --ms MS` — sleep
-- `wait-navigation [--to SUBSTRING] [--timeout-ms 30000]` — wait until the document is REPLACED (form submit, click-through, redirect). A sentinel planted in the old document vanishes when the new one commits, so **same-URL navigations are detected too**. Trigger the click/submit first, then call this — if the navigation is already in flight and page JS no longer answers, that is treated as the event, not an error. `--to` is matched against the URL on **every** poll (and once more right before timing out), read from the browser process when the renderer is too busy for JS, so a destination that arrives late still counts. Proxied navigations can take 20–30 s — raise `--timeout-ms`. Timeout → `NAVIGATION_TIMEOUT` carrying `to`, `current_url`, `document_replaced`, `polls`/`probe_failures` so the reason is readable off the response. A completed wait also carries `document` — the newest top-frame chain from `nav-log` (status, hops, challenge).
-- `nav-log [--since-ms N] [--url-pattern STR] [--frames] [--max 20] [--headers] [--no-redact]` — the **navigation timeline**: one entry per document request chain with EVERY hop (redirects included — their response never produces `responseReceived`, so nothing else records them), each hop's `status`, `key_headers` (`location`, `cf-mitigated`, `cf-ray`, `server`, `content-type`, …), `set_cookie_names`, a detected `challenge` (`cloudflare:<value>` from `cf-mitigated`), and whether the response `committed`. Top frame by default; `--frames` adds iframe documents. `--headers` adds the request headers **as sent on the wire** (`requestWillBeSentExtraInfo`: cookies, `sec-fetch-*`; cookie values masked to `name=…[len]`) and the full response headers per hop. Always on — no `--record`; daemon-memory read. WebView2 on Windows, or `--engine chrome`
-- `failed-requests [--since-ms N] [--url-pattern STR] [--resource-type TYPE] [--no-http-errors] [--include-canceled] [--max 50] [--headers]` — every failed request of **any resource type** (document, script, image, font, fetch, …) **with its URL**, which CDP's `loadingFailed` never carries. `kind`: `blocked` (CSP / mixed content, with `blocked_reason`), `cors` (`cors_error`), `network_error` (`net::ERR_*`), `http_error` (status ≥ 400), `canceled` (hidden unless `--include-canceled` — navigating away and ad slots make plenty). Carries `initiator`/`initiator_url` and `frame_id`; `summary` counts by kind and type. Always on
-- `response-headers [--url-pattern STR] [--resource-type TYPE] [--max 50] [--no-redact]` — response headers, **including the navigation document**. WebView2 on Windows or `--engine chrome`; no `--record` needed. **Redirect hops are entries too** (`redirect: true`, sharing the request id of the chain) — before 0.18 the `302` in front of a document was silently missing.
-  - This is the only view of the document's headers. `get-requests` / `network-log` are an in-page `fetch`/XHR hook, and that hook does not exist yet when the document is fetched — the navigation is invisible to them by construction. `dump-recording` carries CDP network events but never stored headers.
-  - `--resource-type document` is usually what you want: CSP, CORP/COEP, cache policy and cookies are all decided there. Documents live in a separate ring, so a page with hundreds of subresources cannot push the navigation out of the buffer.
-  - Capture is armed at daemon start because `Network.responseReceived` fires **once**, at navigation time — there is no way to ask for it afterwards.
-  - `set-cookie` values are masked by default; the cookie name and its attributes (`Path`/`Domain`/`HttpOnly`/`SameSite`/`Secure`) are kept because those are what you debug with. `--no-redact` for the raw value.
-  - `raw_headers` appears when `Network.responseReceivedExtraInfo` arrived — headers exactly as they came off the wire, including repeated `set-cookie` lines.
-  - Every entry carries `ts_ms` (wall-clock capture time) — when the same URL was loaded several times, that is how you tell the loads apart.
-- `console-logs [--level log|info|warn|error|debug] [--source console|csp|security|network|deprecation|violation] [--frame top|INDEX|FRAME_ID] [--text SUBSTR] [--max 100] [--clear]` — read the page's captured console (log/info/warn/error/debug + uncaught errors + unhandled rejections) from the top document **and every frame, cross-site (out-of-process) ones included** — each line carries `frame_id`. Ring buffer (500 entries, `start --console-buffer N` for more), armed at daemon start; the oldest are dropped first and `dropped` counts them. `--frame` uses `exec-js --frame`'s vocabulary (`top` also keeps lines with no frame id); `matched` is the count before `--max`.
-  - **CSP violations land here too** (`--source csp`), collected from CDP `Log.entryAdded` and `Audits.issueAdded`. The page's own `securitypolicyviolation` event does not fire in this environment, so this is the only way to see a policy block — without it a blocked load is completely silent. Each entry carries `source`; untagged entries are the page's own `console.*` calls.
-  - **The page cannot tell it is being captured.** `console.log` is never wrapped: Windows subscribes to CDP `Runtime.consoleAPICalled` in the browser process, macOS turns on WebKit's own system-console logging and reads it back out of `log stream`. So `console.log.toString()` stays `[native code]`, and a getter-trapped object passed to `console.log` is never read — which is what anti-debug libraries like `disable-devtool` use to decide DevTools is open. (The old in-page hook serialized arguments with `JSON.stringify`, invoked those getters, and made every protected site redirect away.)
-  - Because it reads daemon memory it **keeps answering while the renderer is wedged**, unlike the in-page capture it replaced.
-  - Object arguments are rendered from the engine's own preview, so accessors show as `[getter]` rather than being resolved.
-  - Every response carries `console_transport`: `cdp` | `in_page_fallback` | `disabled` | `unavailable`. `unavailable` means capture never came up — an empty buffer there means nothing at all.
-  - Every response also carries `csp_bypassed` — read it in the same response before concluding anything from zero CSP violations ("nothing was blocked" on a bypassing daemon says nothing about the policy).
-  - Page `console.*` lines and uncaught errors carry `context_id` + `frame_id` (Windows). On a proxy every frame's `url` is identical, so the frame id is the only thing that says *which* of 25 frames logged a line — pair it with `get-frames`.
-- `cookies [list|clear] [--url URL | --domain D | --all] [--name N] [--no-redact] [--force-shared] [--dry-run]` — the browser's cookie jar through CDP, **HttpOnly cookies included** (invisible to `document.cookie`), and cookies on **parent domains** (`.example.com`: `_ga`, consent, cross-subdomain sessions) and third-party domains — which `clear-site-data` (one origin) leaves behind. Default scope: exactly what the browser would send to the current page; `--domain` = that domain, its subdomains and its parents; `--all` = the whole jar. Values masked unless `--no-redact`; each cookie reports `host_only`, `http_only`, `secure`, `same_site`, `expires`. `clear` deletes, then re-reads the jar and reports `remaining` (a CDP delete with a non-exact domain is otherwise a silent no-op). Refuses on the shared profile — even with no other daemon running — unless `--force-shared`; `--dry-run` lists what it would delete. Field names are snake_case (`http_only`, not CDP's `httpOnly`) — `--jq`/`--field` warn on stderr when a key is spelled the CDP way
-
-**Advanced:**
-- `exec-js --script "return document.title"` (alias: `--code`) or `exec-js --file probe.js` — prefer `--file` for anything beyond a one-liner: `--script "$(cat probe.js)"` breaks whenever the script contains quotes, backticks or `$`, `--file` never does. Results hard-capped at 5 MB. Runs in the page's **main world** (page globals ARE visible) but only in the **top frame** — a global set inside an iframe reads as `undefined` from here. Every result reports `world` / `frame` / `frame_id` / `frame_origin` / `context_id` — including the default untargeted call, so a context left over from a replaced document is visible rather than a guess.
-- `exec-js --frame <top|INDEX|origin-substring|frame-id>` — run inside a specific frame (Windows). `INDEX` is the **`get-frames` index** — same DOM enumeration on both sides, so `get-frames` index N and `--frame N` are the same frame by construction; `frame-id` (reported by `get-frames` and `known_frames`) is the stable handle. Out-of-range indexes are rejected (`FRAME_INDEX_OUT_OF_RANGE` with `dom_frame_count`); a miss returns `known_frames`. A frame with no main-world context (srcless/about:blank frames may never announce one) is an honest `NO_MAIN_WORLD_CONTEXT` — use `--world isolated` there, it only needs the frame id.
-  - **Cross-site (out-of-process) frames work too** — by index, frame id, name or URL substring, main or isolated world — through the frame's own CDP session; the result says `out_of_process: true`. A Cloudflare widget (`challenges.cloudflare.com`) is such a frame.
-  - **`RENDERER_BUSY` ≠ `FRAME_NOT_FOUND`.** `RENDERER_BUSY`: the frame exists and got the evaluate, but its renderer did not answer within `--timeout-ms` (a page computing a challenge). `FRAME_NOT_FOUND`: no such frame, decided before anything is sent. While a frame is busy, `console-logs` and `nav-log` (daemon memory) keep answering.
-- `exec-js --world isolated` — a real isolated world via `Page.createIsolatedWorld` (Windows): hidden from page hooks, and correspondingly blind to page globals. Use `main` (the default) when you need to read what the page created.
-  - **CSP and the isolated world — measured, not assumed.** The world is created with `grantUniveralAccess`, which lifts the *same-origin policy* but not the page's CSP: on a page with `connect-src 'self'`, a request to a non-allowlisted origin is blocked in `--world isolated` exactly as in `--world main`, and each produces its own violation. So an isolated world is not a CSP bypass.
-  - **What actually removes the wall is dalzzack itself.** By default the daemon calls `Page.setBypassCSP`, which disables enforcement for *every* world — so nothing is ever blocked, no violation is ever reported, and a load that a real browser would refuse succeeds here. If you are testing a policy, `start --enforce-csp` first; `list` reports `csp_bypassed`. To read the policy rather than test it, use `response-headers --resource-type document`.
-- `exec-js --await --script "const r = await fetch('/x'); return r.status"` — resolve a promise instead of failing on it, so the script can use top-level `await` (Windows: CDP `Runtime.evaluate {awaitPromise:true}`; macOS: `callAsyncJavaScript`). Without `--await`, returning a promise fails with "Promise result not supported in sync mode".
-- `exec-js --target sw [--script …]` — evaluate inside the page's **service worker** (its own isolate: `self`, `caches`, `clients`, the worker's globals — nothing page-side can reach them). `--target sw:<substring>` picks the worker whose script URL contains it; plain `sw` the most recently attached. `--await` works; `--frame`/`--world` don't apply. Results carry `target: "service_worker"`, `session_id`, `script_url`. `NO_SERVICE_WORKER` lists what is attached. WebView2 on Windows or `--engine chrome`
-- `get-requests [--url-pattern STR] [--seconds 60] [--max-count N] [--include-headers] [--no-redact]` — captured XHR/fetch. **In-page hook**: script/CSS/image loads are invisible to it and it cannot say who initiated a request. For either, use `failed-requests` / `nav-log` (always on) or `dump-recording` — its CDP network events cover every request type and carry `initiator` (with a JS call stack for script-triggered loads). `--include-headers` adds each request's headers + timestamp (Authorization/Cookie redacted to a 12-char prefix; `--no-redact` for full values). On `--engine chrome` it is served from CDP instead (`source: "cdp"`, nothing injected; `bodyPreview` via `Network.getResponseBody`).
-- `get-frames [--full]`, `get-frame-html [--selector CSS | --index N]` — iframe listing / HTML. Each frame carries its CDP `frame_id` (Windows) — the handle `exec-js --frame` accepts — and the listing index doubles as `--frame`'s index space. A cross-site frame is marked `out_of_process: true` with its current `url` (read from its own target — the parent cannot see a cross-site frame's location). `name` is truncated to 200 chars by default (`name_len`/`name_truncated` mark the cut — SafeFrame ad slots put multi-KB JSON there); `--full` returns complete values.
-- `dismiss-modals [--max-attempts 3]` — close modals/popups (Vue/Element/Bootstrap)
-- `captcha --input-file PATH [--output-file PATH]` — captcha image preprocessing
-
-**Fault injection (client-side network interception):** break the network on purpose to reproduce race/timeout bugs — no server access needed. Rules are applied via document-start injection, so they beat the app bundle's own `fetch` capture, persist across navigations, and die with the daemon.
-- `intercept --pattern "*/portfolio*" --action hang [--ms N]` — matching requests never resolve (black hole). Honors the app's own AbortController/timeout; `--ms` optionally auto-errors after N ms. Pending requests show up in `get-requests` with `intercepted:"hang"`.
-- `intercept --pattern "*/markets*" --action delay --ms 8000` — hold matching requests N ms, then pass through normally.
-- `intercept --pattern "*/orders" --action fail` — immediate TypeError('Failed to fetch') network error.
-- `intercept --pattern "*/quote*" --action mock [--status 500] [--body '{"err":1}'] [--content-type application/json] [--ms N]` — respond locally without touching the network.
-- `--method POST` on any rule restricts it to one HTTP method. Pattern without `*` = substring match; with `*` = glob over the full URL. First matching rule wins; re-adding the same pattern replaces it.
-- `intercept-list` — active rules + the rule-set version the live page has applied.
-- `intercept-clear [--pattern STR]` — remove all rules, or just one pattern.
-- On `--engine chrome` the same rules are enforced by Chrome itself through CDP's `Fetch` domain (`sync.transport: "cdp_fetch"`) — nothing is injected, `fetch.toString()` stays native. Same scope: fetch and XHR, in every frame (cross-site frames are held at start until their rules are in place); a `mock` also answers the request's CORS preflight locally and echoes the request's `Origin` with credentials allowed, so credentialed cross-origin mocks work.
-
-**Document-start injection:** run your own script *before any page script*, on every navigation. This is the only way to observe what happens before the page's own code runs — `exec-js` needs a loaded document, so by the time it arrives the first API call and the first DOM insertion are already history.
-- `inject-script --name LABEL (--script JS | --file PATH) [--world isolated|main]` — register it. Takes effect from the **next** navigation.
-- **The world is the important choice.** `isolated` (default) shares the DOM but **cannot see page globals** — it cannot wrap `window.fetch` or anything the page created, so a script written for that will run happily and observe nothing. Use `--world main` to pre-empt a page API. Measured: a `main`-world `Object.defineProperty` hook catches the page's *first* assignment; from `isolated` the same global reads `undefined` while the DOM is visible.
-- The isolated world is the same one `exec-js --world isolated` uses, so values the injected script leaves behind are readable from there. Verified at document start: `readyState: "loading"`, `document.scripts.length: 0`, `document.body === null`.
-- `inject-list` — what is registered, and the world each runs in.
-- `inject-clear [--name LABEL]` — unregister one or all. **macOS cannot remove an individual `WKUserScript`**, so there the response says the script keeps running until the daemon restarts rather than implying a clean page.
-- Scripts live in daemon memory and die with it. Windows uses CDP `Page.addScriptToEvaluateOnNewDocument`; macOS uses `WKUserScript` in a named `WKContentWorld`.
-- Typical request-queue check: 4× `intercept --action hang` on distinct endpoints → drive the UI → `get-requests --include-headers` shows the 4 pending slots while the 5th request still completes; the app's 25s abort surfaces as `error:"aborted"`.
-- Typical account-switch check: `intercept --action delay --ms 8000` to back up the queue → switch accounts → `get-requests --include-headers` and compare the Authorization prefix of requests fired after the switch.
-
-**Diagnostics (hung / slow renderer):** when `exec-js` or other tools time out, the renderer is wedged. These look at it from the OUTSIDE.
-- `pause --id ID [--duration-ms 1200]` — WHERE is it frozen. macOS: external `sample` of the WebContent process (works on a fully hung renderer). Windows: CDP JS stack PLUS a `MiniDumpWriteDump`-based minidump of every renderer process — driven by Windows kernel debug APIs, so it works on a fully wedged renderer (the kernel takes the dump, not V8). Open `.dmp` in WinDbg/Visual Studio. **Start here for any freeze.**
-- `pause --id ID --symbolize [--download-symbols] [--symbol-cache DIR] [--all-threads]` — Windows: resolve native stacks to function names (dbghelp) instead of handing back a `.dmp` path. **Threads blocked in a syscall are excluded** and counted as `waiting_threads` — leaving them in puts "the process was idle" at the top of every histogram. Classification is by *symbol*, so a thread inside `NtAllocateVirtualMemory` counts as WORK (an allocation storm is exactly what you're usually hunting) while `NtWaitForSingleObject` counts as a wait. Module paths come from the dump itself, so a WebView2 auto-update can't break symbol loading. Without `--download-symbols` only exported symbols resolve and the rest falls back to `module+0xRVA` rather than vanishing.
-- **`--download-symbols` needs `dbghelp.dll` + `symsrv.dll` next to `dalzzack.exe`.** The System32 dbghelp has no symbol-server support, and the loader binds it by base name at process start, so nothing can redirect it later. If those DLLs are missing, dalzzack copies them from the Windows Kits Debuggers folder and tells you to re-run. Check `dbghelp` (`external` = good, `system` = downloads impossible), `symsrv_loaded`, and `dbghelp_log` (dbghelp's own account of where it searched) in the response. First fetch of `msedge.dll.pdb` is ~630 MB.
-- `pause --id ID --samples N [--interval-ms M]` — take N dumps of **one** process instead of one dump of every process. With `--symbolize` the response carries a frame histogram — the only way to tell "spinning here" from "happened to be here". The target picks itself: the first sample dumps everything, then sampling follows whichever process actually has busy threads (`sampled_pid` + `sample_target_reason` say which and why). `suggested_pid` is now reported in every mode, not just full-memory.
-- `pause --id ID --full-memory [--only-pid PID] [--all-processes] [--max-bytes N]` — Windows: dump the **heap too** (`MiniDumpWithFullMemory` + full-memory-info + handle data), so page/JS strings and allocations are searchable in the `.dmp`. This is the answer to *"what is being allocated?"* — the default dump is stacks-only and contains no page strings at all. Size ≈ the target's working set, so without `--only-pid` only the **largest** WebView2 process is dumped (`--all-processes` overrides; that's GBs). Every run reports `candidate_processes` (pid + working set) — pick your `--only-pid` from there. `--max-bytes` warns, never fails.
-- `profile-start --id ID` … reproduce the issue … `profile-stop --id ID [--output cpu.json]` — CPU sampling (busy-loop vs idle-wait).
-- `heap-snapshot --id ID [--output PATH]` — memory report (macOS native memory; Windows JS heap usage).
-- `console-dump --id ID [--level LVL] [--max N]` — same buffer as `console-logs`, plus a `source` field naming the transport that answered and explicit hung-renderer flagging. On `cdp` / `os_log` it is a daemon-memory read and works straight through a hang.
-- `sw-console --id ID [--level LVL] [--max N] [--clear]` — the **Service Worker's own** console + uncaught exceptions (incl. a SW `fetch()` failing on CSP). A SW runs in its own isolate, so nothing it logs reaches `console-logs`/`console-dump`. WebView2 on Windows, or `--engine chrome` (where workers are held at start, so their boot logs are captured). Two transports, armed together: `Target.setAutoAttach` (full `console.*` + exceptions, but a SW target belongs to the *browser*, not this page session, so attach often isn't possible) and the `ServiceWorker` domain (`workerErrorReported` — errors only, reachable from the page session). A per-session `Runtime.enable` timeout is now degradation, not failure: worker errors already captured are still returned (`diagnostics.session_runtime_enable_error` flags it). `SW_ATTACH_UNAVAILABLE` fires only when NO transport is live and nothing was captured, and its `diagnostics` names the cause — no worker (`worker_versions_seen: 0`), attach refused (raw CDP error), or a runtime without `ICoreWebView2_11` (`session_cdp_available: false`).
-- `network-log --id ID [--since-ms N] [--url-pattern STR] [--max N]` — fetch/XHR, flags requests still pending (a common hang trigger).
-- `attach-devtools --id ID` — macOS: enable Safari Web Inspector; Windows: open the WebView2 DevTools window.
-- `exec-js-isolated --id ID --script "..." [--timeout-ms 30000]` — run JS in a world isolated from page globals. Note it evaluates in the page's *default* context, not a real isolated world — `exec-js --world isolated` is the real thing.
-- `wait-for-condition --id ID --script "return COND" [--timeout-ms 30000] [--interval-ms 250]` — poll a JS condition (detects wedged renderer instead of blocking forever).
-- `dump-recording --id ID [--output PATH] [--filter all|network|console|exceptions] [--since-ms N] [--clear]` — snapshot the always-on recording buffer. **Pure daemon-memory read, no IPC into the page** — answers even when every other diagnostics tool would time out. Requires `start --record` or `record on` (a tape stopped by `record off` stays readable and says so in `note`). Reports `renderer_wedged_at_ms` so you can see exactly when capture stopped, and `armed`/`arm_error`/`arm_verified`: an empty tape now tells you whether the page was quiet or the capture transport never came up (it returns `RECORDING_NOT_ARMED` instead of a plausible-looking zero). `arm_verified` is a startup self-test — the daemon logs one console line on its own landing page, confirms it arrives, and removes it from the tape — so "events are flowing" is proven rather than assumed. `dalzzack_version` is included; if it's older than you expect, the daemon is a stale binary.
-- `trace --id ID [--duration-ms 2000] [--output PATH] [--categories STR]` — capture a chrome-tracing-compatible timeline. Windows: real CDP `Tracing.*` over the browser process (hang-resistant, includes V8/blink internals). macOS: Performance API + paint/longtask via injection (degraded). Output opens in chrome://tracing or perfetto.
-- `debugger-arm --id ID [--strategy first-script|exceptions|url] [--url-pattern REGEX]` / `debugger-snapshot --id ID [--clear]` / `debugger-disarm --id ID` — Windows-only: pre-arm V8 so `Debugger.paused` events fire, daemon buffers call frames and auto-resumes. Use when "what JS is running at startup?" matters.
-- `debugger-snapshot` resolves each frame's `scriptId` to a URL by joining against buffered `Debugger.scriptParsed` — call frames carry a scriptId and an *empty* `url` for eval'd, bundled and inline scripts, which is exactly the code worth identifying. Each frame gets `url`, `url_source` (`call_frame` | `script_parsed` | `unknown`), `pageLineNumber` (inline scripts offset by the script's `startLine`) and `script_origin_stack` (who called `eval`). The `scripts[]` table lists the referenced scripts; `scripts_unresolved` counts ids we never saw parsed.
-- `debugger-arm --strategy exceptions [--uncaught-only] [--max-frames N] [--sample-every N]` — pause on **every throw** (`Debugger.setPauseOnExceptions`). This is the only way to see engine-thrown errors: Proxy-invariant `TypeError`s, `Illegal invocation`, and friends never pass through the page's global `Error`/`TypeError` constructors, so wrapping those in-page always reports zero. Every throw pausing V8 is slow by construction — on a storm use `--sample-every N` (record every Nth) and `--max-frames N`. `debugger-snapshot` reports `seen_total` vs `dropped_by_sampling` so the sampled count is never mistaken for the real one, and it reads daemon memory, so it answers on a wedged renderer.
-
-**Batch:** `run --steps workflow.json`
-
-### Chrome engine (`start --engine chrome`)
-
-WebView2 is Chromium but not Chrome, and the differences are what bot defences measure: the TLS ClientHello (measured: Chrome 154 sends 19 extensions, WebView2 18 — the missing one is `trust_anchors` 0xCA34, i.e. a different JA4), client hints, brand list. `--engine chrome` launches the installed Google Chrome on a **fresh throw-away profile** with only `--user-data-dir --remote-debugging-port=<free port> --no-first-run --no-default-browser-check` — no `--enable-automation`, no headless — and serves the same commands over CDP.
-- `start` and `list` report `browser_version` and **`navigator_webdriver`** (measured at startup; must be `false`). Measured: `--remote-debugging-port=0` alone flips it to `true`, which is why dalzzack picks the port itself.
-- Same tools, same output shapes. JS-based tools run through `Runtime.evaluate`; `click`/`hover`/`keyboard` use `Input.dispatch*Event`, so events are **trusted** (`isTrusted: true`, `trusted: true` in the result) and CSS `:hover` fires; `navigate` returns at `load`; `screenshot` uses `Page.captureScreenshot`.
-- Frames: `get-frames` follows the top document's `<iframe>` order (same index space as WebView); cross-site iframes run out of process and are reached through their own session (`out_of_process: true`) — `exec-js --frame N` and `get-frame-html` work in them.
-- CSP is **enforced** (`csp_bypassed: false`) — it is Chrome. `--user-agent` / `--enforce-csp` / `--private-profile` don't apply; `--browser-arg` passes Chrome flags; `--no-console-capture` skips `Runtime.enable` (frame main worlds then need `--world isolated`).
-- `stop` closes Chrome and deletes the profile before it answers (its output carries `chrome.profile_removed`), so `stop && start` is safe; `kill` reaps both; closing the Chrome window (or Chrome dying) stops the daemon. `reset` starts a new Chrome on a new profile under the same id.
-- Not available (WebView2 internals): `pause`, `profile-*`, `heap-snapshot`, `trace`, `debugger-*`, `exec-js-isolated` → `UNSUPPORTED_ON_ENGINE`. Use F12 in the Chrome window instead.
-- **No prerendering** — the one measured difference from a user's Chrome: speculation-rules prerenders are refused while DevTools is attached (`PrerenderingDisabledByDevTools`); prefetch still happens. Don't read a page's missing prerender activation as the site's doing.
-
-### Output filtering (every command that prints one JSON document)
-- `--field PATH` (repeatable) — print one value: `--field status`, `--field document.hops[0].status`, `--field "instances[].id"` (`[]` fans out). Several → an object keyed by path. Missing → `null`. **A `status: "failed"` result is printed whole with exit code 1** — a filter never turns an error into a plausible `null`.
-- `--jq EXPR` — real jq, built in (no `jq` binary needed): `--jq '.navigations[] | {status, final_url}'`. One output per line; sees failures too.
-- `--raw` — strings without quotes (like `jq -r`); a fanned-out string list prints one per line.
-
-### Rules
-- `-i` may be omitted when exactly one instance is running — it is used automatically (noted on stderr). Zero or several instances, and every usage error, fail with one JSON line on **stdout**, so a runner with `2>/dev/null` can no longer turn a mistyped command into a silent no-op
-- After a click/submit that replaces the document, use `wait-navigation` (not a sleep, not URL polling — it catches same-URL navigations). If the page had already landed before the call, it answers `already_at_target: true` within ~1.5 s instead of waiting out the timeout; to wait for a same-URL *re*-navigation, start it before the trigger
-- **Git-Bash (MSYS2) rewrites any argument starting with `/` into a Windows path** — `--to "/zp/p/"` reaches the tool as `C:/Program Files/Git/zp/p/` and matches nothing. Prefix such commands with `MSYS_NO_PATHCONV=1` (or make the value not start with `/`). Affects `--to`, `--url-pattern`, `--pattern`; the response carries `hint_shell_pathconv` when a value has that shape
-- Use `describe` first to discover elements, `screenshot` for quick checks
-- Prefer `click --selector` or `--text` over coordinate clicks
-- Use `hover` (not coordinate-only mouseover) to open dropdown menus on macOS; CSS `:hover` won't trigger from JS events alone
-- Use `fill-form --selector --value` for single fields (no JSON needed)
-- Use `wait-for --state added` instead of `sleep` to wait for new content
-- Use `save-image --index -1` to grab the last matching image
-- Use `scroll --to bottom` for SPA containers with dynamic content
-- Use `back` / `forward` / `reload` for history navigation rather than re-navigating to a previous URL
-- Use `console-logs` when JS-driven UI misbehaves — the page's own errors are usually the fastest debug signal. It no longer needs a live renderer, so reach for it during a hang too
-- **To see what happened before the page's own code ran, `inject-script` is the only option** — `exec-js` always arrives too late. Pick `--world main` if you need to wrap or watch a page API; `isolated` cannot see page globals and will silently observe nothing
-- **A tool that answers `status: "failed"` is telling you about itself, not the page.** Decode and parse failures used to be reported as empty results — `get-frames` said "No iframes on the page" for pages full of them. If you get a `JS_RESULT_*` error, the payload is in the message
-- **When something is blocked and you don't know why, read the headers before theorising.** `response-headers --resource-type document` shows the CSP/CORP/cache policy the document was actually served with, and `console-logs --source csp` shows what that policy blocked. Both are on by default
-- **Before concluding anything about a CSP, check `csp_bypassed` in `list`.** dalzzack disables CSP enforcement by default so cross-origin iframes can be inspected — which means nothing is ever blocked and `--source csp` sits at zero regardless of the policy. Restart with `start --enforce-csp` to make the browser a witness. Changing worlds does **not** work around this: the isolated world is subject to the same CSP as the main world (measured), so a load succeeding there is not evidence the policy allows it
-- **Distinguish a CSP block from a CORS block.** They both surface as `Failed to fetch`. `console-logs --source csp` shows only the former; a CORS failure appears with `source: "javascript"` and says so
-- **If a site redirects you away the moment it loads** (often to `google.com`), something dalzzack does is tripping `disable-devtool`. Check `list` for `console_transport`: `in_page_fallback` means the page-visible hook is installed — restart WITHOUT `--console-capture` (macOS) or with `--no-console-capture` (Windows). On macOS the default is already no capture, so a redirect there is not the console hook
-- Don't reach for `--user-agent` to look "more like a browser". The engine's `Sec-CH-UA` headers cannot be overridden, so a mismatched UA scores *worse* than the default. Windows already sends a consistent Edge UA
-- To reset ONE origin to a first-visit state, run `clear-site-data` then `reload --hard`; for everything (parent-domain and third-party cookies included) use `reset` — on a `--private-profile` or `--engine chrome` instance, since plain instances share one profile. Don't try to unregister a service worker from page JS — a proxy/membrane can hide `navigator.serviceWorker.controller` and a policy can block `getRegistrations()`, so it silently no-ops
-- **"Did the site let us through?" is a question for `nav-log`, not the final URL.** A challenge that solves itself (`403` + `cf-mitigated: challenge`, then a script reload) ends on the right page and used to read as a plain success; `navigate`'s `document`/`challenge`/`later_navigations` and `nav-log` show both hops
-- **"WebView2 gets challenged" is not evidence about the site.** WebView2's TLS ClientHello and client hints differ from Chrome's; answer "what does Chrome get?" with `start --engine chrome`, and check `navigator_webdriver: false` in its `start` output
-- A script, image or iframe that silently failed to load: `failed-requests` (URL + `kind` + `error_text`), not `get-requests` (fetch/XHR only)
-- When `cookies clear` or `reset` answers `SHARED_PROFILE`, this daemon is on the shared cookie jar — other sessions' daemons use it now or later, so "no other daemon is up" is not "nobody uses it". Restart with `--private-profile` rather than reaching for `--force-shared`, or `--dry-run` to see what is at stake
-- A `--jq`/`--field` key that does not exist reads as `null`. If stderr says `no key "httpOnly" … did you mean "http_only"?`, the output is snake_case and the key was spelled the CDP way
-- If the SW itself is the suspect (a panic or trace inside it), read `sw-console` — those logs never appear in `console-logs`
-- Reach for `exec-js --await` instead of stashing a promise on `window.__x` and polling it with a second `exec-js` call
-- When a tool times out (especially `exec-js` / `navigate`), run `pause` first to confirm the renderer is wedged; don't keep retrying the same call
-- For sessions where post-mortem matters (which request stalled? which JS errored before the freeze?), launch with `start --record` so `dump-recording` has a hang-resistant tape to read
-- **A tool timing out is not proof the page is wedged.** Check `list` → `renderer_ok` first: if it's false the webview itself never came up, and every timeout from that daemon is the tool's, not the page's
-- `exec-js` sees page globals (main world) but only in the **top frame** — if something reads as `undefined`, try `--frame` before concluding your instrumentation failed. Count frames with `get-frames` and target with the same index or, better, the `frame_id` it reports — the two tools share one coordinate system
-- A targeted exec-js failing as `CONTEXT_NOT_FOUND` means the frame's document was replaced since the context was recorded (iframe reload, ad-slot recycle) — re-run `get-frames` and target again; the payload carries `known_frames`
-- On a wedge, prefer `pause --symbolize --samples 6` over a single `pause`: one sample can't distinguish spinning from passing through. For msedge-internal names (V8 GC/alloc), you need `--download-symbols`, which needs `dbghelp.dll`+`symsrv.dll` beside the exe — dalzzack installs them on first use and asks you to re-run once
-- When `pause` tells you *where* the stack is but not *why* (GC / exception machinery in the RIP histogram), re-run it with `--full-memory --only-pid <the fat renderer>` — the stacks-only dump has no heap, so it cannot answer "what is allocated"
-- Don't try to count engine-thrown exceptions by wrapping `window.Error`/`TypeError` — those never go through the JS constructors and you'll measure zero. Use `debugger-arm --strategy exceptions`
-- Use `kill` only when `stop` fails — graceful shutdown gives the daemon a chance to clean up
-- **`start` flags only apply to a NEW daemon.** Re-running `start --record` against a live id returns `already_running` and lists what it ignored in `ignored_flags` — the daemon keeps the flags it was born with. `stop` then `start` to change them
-- If `dump-recording` looks empty, read `list` first: `record: false` means it was never recording (`record on` turns it on now — earlier events are gone), and an old `version` means `dalzzack upgrade` hasn't reached that daemon
-- **Never re-run `start` to change window size** — it's a no-op if the id is alive and responsive. Use `resize` for live windows; `list` to check what's alive.
-- `--width/--height` on `start` only set the *initial* size; they don't override an existing daemon's window.
-<!-- dalzzack-end -->
-"##;
+/// `guide`: one topic, all of them, or the list of topics.
+fn print_guide(topic: Option<&str>, all: bool) {
+    if all {
+        for (_, _, text) in GUIDE_TOPICS {
+            println!("{text}");
+        }
+        return;
+    }
+    let Some(topic) = topic else {
+        println!("dalzzack guide <topic>\n");
+        for (name, about, _) in GUIDE_TOPICS {
+            println!("  {name:<12} {about}");
+        }
+        return;
+    };
+    match GUIDE_TOPICS.iter().find(|(name, _, _)| *name == topic) {
+        Some((_, _, text)) => print!("{text}"),
+        None => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "failed",
+                    "error": "UNKNOWN_TOPIC",
+                    "message": format!("No topic is named {topic}. `dalzzack guide` lists them."),
+                })
+            );
+            std::process::exit(2);
+        }
+    }
+}
 
 fn inject_docs(file_path: &std::path::Path, label: &str) {
     use std::fs;
@@ -2608,39 +2726,19 @@ fn inject_docs(file_path: &std::path::Path, label: &str) {
         fs::create_dir_all(parent).ok();
     }
 
-    let existing = fs::read_to_string(file_path).unwrap_or_default();
-
-    // Remove existing section between markers
-    let cleaned = if existing.contains("<!-- dalzzack-begin -->") {
-        let mut result = String::new();
-        let mut skip = false;
-        for line in existing.lines() {
-            if line.contains("<!-- dalzzack-begin -->") {
-                skip = true;
-                continue;
-            }
-            if line.contains("<!-- dalzzack-end -->") {
-                skip = false;
-                continue;
-            }
-            if !skip {
-                result.push_str(line);
-                result.push('\n');
-            }
-        }
-        eprintln!("  Updated existing dalzzack section in {}", label);
-        result
-    } else {
-        existing
+    // Only a missing file counts as empty: writing after any other read error
+    // would replace the user's file.
+    let existing = match fs::read_to_string(file_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => fail_install(file_path, &format!("cannot read the file: {e}")),
     };
-
-    let mut final_content = cleaned.trim_end().to_string();
-    if !final_content.is_empty() {
-        final_content.push_str("\n\n");
+    let updated = with_docs(&existing).unwrap_or_else(|message| fail_install(file_path, &message));
+    if existing.contains(BLOCK_BEGIN) {
+        eprintln!("  Updated existing dalzzack section in {}", label);
     }
-    final_content.push_str(DALZZACK_DOCS);
 
-    fs::write(file_path, final_content).unwrap_or_else(|e| {
+    fs::write(file_path, updated).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", label, e);
         std::process::exit(1);
     });
@@ -2648,239 +2746,50 @@ fn inject_docs(file_path: &std::path::Path, label: &str) {
     eprintln!("  Injected into {}", file_path.display());
 }
 
-/// Compile-time repository URL (from Cargo.toml `repository = "..."`).
-/// Empty string when unset; `upgrade` falls back to an error in that case.
-const BAKED_REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
-
-/// The plain-binary archive that `release.yml` attaches for this platform.
-#[cfg(target_os = "macos")]
-const RELEASE_ASSET: Option<&str> = Some("dalzzack-macos-universal.tar.gz");
-#[cfg(target_os = "windows")]
-const RELEASE_ASSET: Option<&str> = Some("dalzzack-windows-x64.zip");
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const RELEASE_ASSET: Option<&str> = None;
-
-/// `<repo>/releases/latest/download/<asset>`: the newest release's archive,
-/// whose name never changes. `None` without a repository URL or without a
-/// release build for this platform.
-fn release_download_url(repo: &str, asset: Option<&str>) -> Option<String> {
-    let repo = repo.trim_end_matches('/');
-    match asset {
-        Some(asset) if !repo.is_empty() => Some(format!("{repo}/releases/latest/download/{asset}")),
-        _ => None,
-    }
+fn fail_install(file: &std::path::Path, message: &str) -> ! {
+    println!(
+        "{}",
+        serde_json::json!({
+            "status": "failed",
+            "error": "GUIDE_NOT_INSTALLED",
+            "file": file.display().to_string(),
+            "message": message,
+        })
+    );
+    std::process::exit(1);
 }
 
-fn cargo_on_path() -> bool {
-    std::process::Command::new("cargo")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-/// Same file, also when one path goes through a symlink or differs in case
-/// on a case-insensitive file system.
-fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
-}
-
-/// `dalzzack upgrade` — reinstall this binary via cargo, stopping any
-/// running daemons first so they pick up the new code on next `start`.
-fn upgrade(
-    path: Option<PathBuf>,
-    git_override: Option<String>,
-    rev: Option<String>,
-    keep_daemons: bool,
-    no_locked: bool,
-) {
-    // 0. A binary installed from a release archive can run on a machine with
-    //    no Rust. Point it at the archive before any daemon is stopped.
-    if !cargo_on_path() {
-        println!(
-            "{}",
-            serde_json::json!({
-                "status": "failed",
-                "error": "cargo_not_found",
-                "message": "upgrade builds dalzzack from source with cargo, and cargo is not on PATH.",
-                "download_url": release_download_url(BAKED_REPO_URL, RELEASE_ASSET),
-                "current_exe": std::env::current_exe().ok().map(|p| p.display().to_string()),
-                "hint": "Download the archive, stop the running daemons (`dalzzack list`, then \
-                         `dalzzack stop --id <id>`), and replace current_exe with the binary \
-                         inside. Or install Rust from https://rustup.rs and run upgrade again.",
-            })
-        );
-        std::process::exit(1);
-    }
-    // Captured before step 3 renames the running image on Windows.
-    let running_from = std::env::current_exe().ok();
-
-    // 1. Discover and stop running daemons (unless --keep-daemons).
-    let alive = list_running_instance_ids();
-    if !alive.is_empty() {
-        if keep_daemons {
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "status": "failed",
-                    "error": "daemons_running",
-                    "ids": alive,
-                    "message": "Refusing to upgrade with daemons running. Stop them or omit --keep-daemons.",
-                })
-            );
-            std::process::exit(1);
-        }
-        eprintln!(
-            "[upgrade] stopping {} running daemon(s): {:?}",
-            alive.len(),
-            alive
-        );
-        for id in &alive {
-            stop_or_kill(id);
-        }
-    }
-
-    // 2. Pick source.
-    let mut cmd = std::process::Command::new("cargo");
-    cmd.arg("install");
-    if !no_locked {
-        cmd.arg("--locked");
-    }
-    cmd.arg("--force");
-
-    if let Some(p) = path {
-        let p_str = p.to_string_lossy().to_string();
-        eprintln!("[upgrade] cargo install --path {} --force", p_str);
-        cmd.arg("--path").arg(p);
-    } else {
-        let url = git_override.unwrap_or_else(|| BAKED_REPO_URL.to_string());
-        if url.is_empty() {
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "status": "failed",
-                    "error": "no_source",
-                    "message": "No repository URL baked in. Pass --git <URL> or --path <DIR>.",
-                })
-            );
-            std::process::exit(1);
-        }
-        eprintln!("[upgrade] cargo install --git {} --force", url);
-        cmd.arg("--git").arg(&url);
-        if let Some(r) = rev {
-            cmd.arg("--rev").arg(r);
-        }
-    }
-
-    // 3. Windows: get the running image out of cargo's way.
-    //
-    // Windows refuses to overwrite or delete an executable that is currently
-    // running — and the process running `dalzzack upgrade` IS the installed
-    // `dalzzack.exe`, so `cargo install` built fine and then failed on the
-    // final move with os error 5, with no daemon left to blame. A running image
-    // may be *renamed*, though: move it aside to `.old`, let cargo drop the new
-    // file into place, and sweep the `.old` on the next start (the rustup /
-    // cargo-update pattern).
-    let install_target = cargo_install_target();
-    let moved_aside = moved_aside_path(&install_target);
-    #[cfg(target_os = "windows")]
-    if install_target.exists() {
-        let _ = std::fs::remove_file(&moved_aside);
-        match std::fs::rename(&install_target, &moved_aside) {
-            Ok(()) => eprintln!(
-                "[upgrade] moved running image aside: {} -> {}",
-                install_target.display(),
-                moved_aside.display()
-            ),
-            Err(e) => eprintln!(
-                "[upgrade] could not move {} aside ({e}); cargo may fail to replace it",
-                install_target.display()
-            ),
-        }
-    }
-
-    // 4. Run cargo install.
-    let status = match cmd.status() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "status": "failed",
-                    "error": "cargo_spawn_failed",
-                    "message": format!("Failed to run cargo: {}. Is cargo on PATH?", e),
-                })
-            );
-            std::process::exit(1);
-        }
-    };
-
-    if !status.success() {
-        // Put the previous binary back if cargo never produced a new one, so a
-        // failed upgrade leaves a working `dalzzack` rather than none.
-        let restored = if moved_aside.exists() && !install_target.exists() {
-            std::fs::rename(&moved_aside, &install_target).is_ok()
-        } else {
-            false
+/// Rewrite the guide where it is already installed. `upgrade` runs this with
+/// the new binary, so the guide always matches the commands. It creates nothing:
+/// an agent the user did not set up stays that way.
+fn refresh_docs() {
+    let mut refreshed = Vec::new();
+    let mut failed = Vec::new();
+    for path in global_files() {
+        let Ok(existing) = std::fs::read_to_string(&path) else {
+            continue;
         };
-        println!(
-            "{}",
-            serde_json::json!({
-                "status": "failed",
-                "error": "cargo_install_failed",
-                "exit_code": status.code(),
-                "install_target": install_target.display().to_string(),
-                "previous_binary_restored": restored,
-                "hint": "Read cargo's own output above for the failing step. If it is the final \
-                         move onto the install target with 'os error 5', something still has that \
-                         file open — a daemon started from THIS binary (`dalzzack list`), or an \
-                         antivirus scan; the running upgrade process itself is moved aside first \
-                         and is not the cause.",
-            })
-        );
-        std::process::exit(1);
+        if !existing.contains(BLOCK_BEGIN) && !existing.contains(BLOCK_END) {
+            continue;
+        }
+        let written = with_docs(&existing)
+            .and_then(|updated| std::fs::write(&path, updated).map_err(|e| e.to_string()));
+        match written {
+            Ok(()) => refreshed.push(path.display().to_string()),
+            Err(message) => failed.push(serde_json::json!({
+                "file": path.display().to_string(),
+                "message": message,
+            })),
+        }
     }
-    // The old image is still mapped by this very process, so deleting it here
-    // fails on Windows — it is swept on the next start (`sweep_moved_aside`).
-    let _ = std::fs::remove_file(&moved_aside);
-
-    // 5. macOS: ad-hoc re-codesign the new binary so Gatekeeper doesn't grump.
-    //    The new binary is the one cargo installed, which is not this process's
-    //    image when dalzzack was installed from a release archive.
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("codesign")
-            .args(["--force", "--sign", "-"])
-            .arg(&install_target)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-
-    let mut out = serde_json::json!({
-        "status": "upgraded",
-        "stopped_daemons": alive,
-        "installed_to": install_target.display().to_string(),
-    });
-    // A binary from a release archive lives outside cargo's bin directory, so
-    // the new build did not replace it and the old copy may still win on PATH.
-    if let Some(exe) = running_from.filter(|exe| !same_path(exe, &install_target)) {
-        out["note"] = format!(
-            "This command ran from {}, which cargo did not replace. Delete that copy, \
-             or put {} before it on PATH.",
-            exe.display(),
-            install_target
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default()
-        )
-        .into();
-    }
-    println!("{out}");
+    println!(
+        "{}",
+        serde_json::json!({
+            "status": if failed.is_empty() { "completed" } else { "failed" },
+            "refreshed": refreshed,
+            "failed": failed,
+        })
+    );
 }
 
 /// Option values that start with `/` are exactly what Git-Bash (MSYS2) rewrites
@@ -2909,106 +2818,6 @@ fn looks_shell_path_converted(v: &str) -> bool {
         && (b[2] == b'/' || b[2] == b'\\');
     has_drive
         && (v.contains("/Git/") || v.contains("\\Git\\") || v.to_ascii_lowercase().contains("msys"))
-}
-
-/// Where `cargo install` puts the binary, in cargo's own precedence:
-/// `$CARGO_INSTALL_ROOT/bin`, else `$CARGO_HOME/bin`, else `~/.cargo/bin`.
-fn cargo_install_target() -> PathBuf {
-    let root = std::env::var_os("CARGO_INSTALL_ROOT")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("CARGO_HOME").map(PathBuf::from))
-        .unwrap_or_else(|| home_dir().join(".cargo"));
-    root.join("bin")
-        .join(format!("dalzzack{}", std::env::consts::EXE_SUFFIX))
-}
-
-/// The name a running image is renamed to while cargo replaces it.
-fn moved_aside_path(target: &std::path::Path) -> PathBuf {
-    let mut s = target.as_os_str().to_owned();
-    s.push(".old");
-    PathBuf::from(s)
-}
-
-/// Delete the `.old` image a previous `upgrade` left behind. The upgrade
-/// itself cannot: on Windows that file was its own running image.
-fn sweep_moved_aside() {
-    // Both the configured install target and wherever this binary actually
-    // lives — they differ when the exe was copied or a CARGO_INSTALL_ROOT
-    // changed between the upgrade and now.
-    let mut candidates = vec![moved_aside_path(&cargo_install_target())];
-    if let Ok(exe) = std::env::current_exe() {
-        candidates.push(moved_aside_path(&exe));
-    }
-    candidates.dedup();
-    for old in candidates {
-        if old.exists() {
-            match std::fs::remove_file(&old) {
-                Ok(()) => tracing::debug!("[upgrade] swept {}", old.display()),
-                // Still mapped by another process (an older daemon, say); next time.
-                Err(e) => tracing::debug!("[upgrade] could not sweep {}: {e}", old.display()),
-            }
-        }
-    }
-}
-
-/// Scan the temp dir for `dalzzack-*.port` files and return the instance IDs.
-/// Doesn't ping — `stop_or_kill` will figure out whether a graceful shutdown works.
-fn list_running_instance_ids() -> Vec<String> {
-    let tmp_dir = std::env::temp_dir();
-    let mut ids = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(rest) = name.strip_prefix("dalzzack-") {
-                if let Some(id) = rest.strip_suffix(".port") {
-                    ids.push(id.to_string());
-                }
-            }
-        }
-    }
-    ids.sort();
-    ids
-}
-
-/// Try graceful shutdown; if it errors out (hung daemon), force-kill by PID.
-/// Both calls are best-effort — we don't want a stuck daemon to block the upgrade.
-fn stop_or_kill(id: &str) {
-    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("dalzzack"));
-    let stop = std::process::Command::new(&exe)
-        .args(["stop", "--id", id])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    if matches!(stop, Ok(s) if s.success()) {
-        eprintln!("[upgrade]   stopped {}", id);
-        return;
-    }
-    eprintln!("[upgrade]   stop failed for {} — force-killing", id);
-    let _ = std::process::Command::new(&exe)
-        .args(["kill", "--id", id])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
-fn home_dir() -> std::path::PathBuf {
-    // Windows: USERPROFILE (e.g. C:\Users\name)
-    // macOS/Linux: HOME (e.g. /Users/name)
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            eprintln!("Error: Could not determine home directory (HOME / USERPROFILE not set)");
-            std::process::exit(1);
-        })
-}
-
-/// Where Codex keeps its global files: `$CODEX_HOME`, else `~/.codex`.
-fn codex_home() -> PathBuf {
-    std::env::var_os("CODEX_HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".codex"))
 }
 
 fn install_docs(target: &str) {
@@ -3045,13 +2854,12 @@ fn install_docs(target: &str) {
             let path = std::path::PathBuf::from("AGENTS.md");
             eprintln!("Installing for Codex (current project)...");
             inject_docs(&path, "AGENTS.md");
-            let abs = path.canonicalize().unwrap_or(path.clone());
             println!(
                 "{}",
                 serde_json::json!({
                     "status": "completed",
                     "target": "codex-project",
-                    "file": abs.display().to_string(),
+                    "file": dalzzack_lib::state::printable_path(&path),
                     "message": "dalzzack docs injected into ./AGENTS.md (current project)"
                 })
             );
@@ -3085,30 +2893,94 @@ fn install_docs(target: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dalzzack_lib::guide_file::DALZZACK_DOCS;
+
+    /// A debug build needs more stack to parse a command line than a test thread
+    /// has. `main` has this much too.
+    fn with_main_stack(test: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(test)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     #[test]
-    fn release_download_url_points_at_the_latest_fixed_name_asset() {
+    fn a_step_is_a_command_line() {
+        use serde_json::json;
+        with_main_stack(|| {
+            let step = command_step(&json!(["click", "--text", "Sign In"])).unwrap();
+            assert_eq!(step.tool, "click_element");
+            assert_eq!(step.args.unwrap()["text"], "Sign In");
+
+            let step = command_step(&json!(["get-html", "--selector", "h1"])).unwrap();
+            assert_eq!(step.tool, "get_html");
+        });
+    }
+
+    #[test]
+    fn a_step_that_is_not_a_page_command_is_refused() {
+        use serde_json::json;
+        with_main_stack(|| {
+            for line in [
+                json!(["stop", "--id", "b"]),
+                json!(["run", "--steps", "x.json"]),
+                json!(["guide"]),
+                json!(["upgrade"]),
+                json!(["uninstall", "--yes"]),
+                json!(["get-url", "-i", "other"]),
+                json!(["no-such-command"]),
+                json!(["click", 5]),
+                json!("click"),
+            ] {
+                assert!(command_step(&line).is_err(), "{line}");
+            }
+        });
+    }
+
+    #[test]
+    fn tools_prints_one_tool_or_only_the_names() {
+        let defs = dalzzack_lib::tools::definitions::get_tool_definitions();
+        let names = tools_output(&defs, None, true);
+        assert_eq!(names.as_array().unwrap().len(), defs.len());
+        assert!(names.to_string().len() < 2048);
+
+        let one = tools_output(&defs, Some("get-html"), false);
+        assert_eq!(one["name"], "get_html");
+        assert_eq!(tools_output(&defs, Some("get_html"), false), one);
+        assert!(one["inputSchema"].is_object());
+
+        assert_eq!(tools_output(&defs, Some("nope"), false)["status"], "failed");
         assert_eq!(
-            release_download_url(
-                "https://github.com/gosuda/dalzzack/",
-                Some("dalzzack-windows-x64.zip")
-            )
-            .as_deref(),
-            Some("https://github.com/gosuda/dalzzack/releases/latest/download/dalzzack-windows-x64.zip")
+            tools_output(&defs, None, false).as_array().unwrap().len(),
+            defs.len()
         );
-        // No repository baked in, or no release build for this platform.
+    }
+
+    #[test]
+    fn the_installed_guide_stays_small() {
+        // Every session of every agent pays for these bytes, also a session
+        // that never opens a browser. The rest belongs in a topic.
+        let size = DALZZACK_DOCS.len();
+        assert!(size <= 4096, "the installed guide is {size} bytes");
+    }
+
+    #[test]
+    fn agents_md_is_the_installed_guide() {
         assert_eq!(
-            release_download_url("", Some("dalzzack-windows-x64.zip")),
-            None
+            include_str!("../../AGENTS.md").replace("\r\n", "\n"),
+            DALZZACK_DOCS.replace("\r\n", "\n"),
+            "run `dalzzack install codex-project` in the repo root"
         );
-        assert_eq!(
-            release_download_url("https://github.com/gosuda/dalzzack", None),
-            None
-        );
-        // The baked-in values on the two release platforms.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        assert!(release_download_url(BAKED_REPO_URL, RELEASE_ASSET)
-            .is_some_and(|u| u.starts_with("https://github.com/gosuda/dalzzack/releases/latest/")));
+    }
+
+    #[test]
+    fn the_installed_guide_names_every_topic() {
+        for (name, about, text) in GUIDE_TOPICS {
+            assert!(DALZZACK_DOCS.contains(name), "{name}");
+            assert!(!about.is_empty() && !text.trim().is_empty(), "{name}");
+        }
     }
 
     #[test]
@@ -3137,11 +3009,5 @@ mod tests {
             hits,
             vec![r#"--to="C:/Program Files/Git/zp/p/""#.to_string()]
         );
-    }
-
-    #[test]
-    fn moved_aside_name_appends_old_to_the_full_filename() {
-        let p = moved_aside_path(std::path::Path::new("C:/x/bin/dalzzack.exe"));
-        assert!(p.to_string_lossy().ends_with("dalzzack.exe.old"));
     }
 }

@@ -5,14 +5,18 @@
 #
 # Environment:
 #   DALZZACK_INSTALL_DIR     Where to put the binary (default: ~/.local/bin).
-#                            Use a folder you can write to: daemon logs go next
-#                            to the binary.
 #   DALZZACK_NO_MODIFY_PATH  Set to 1 to leave your shell profile alone.
+#   DALZZACK_VERSION         The release tag to install, such as v1.1.0-rc.2
+#                            (default: the latest release).
 
 set -eu
 
 asset=dalzzack-macos-universal.tar.gz
-base_url=https://github.com/gosuda/dalzzack/releases/latest/download
+if [ -n "${DALZZACK_VERSION:-}" ]; then
+    base_url=https://github.com/gosuda/dalzzack/releases/download/$DALZZACK_VERSION
+else
+    base_url=https://github.com/gosuda/dalzzack/releases/latest/download
+fi
 
 fail() {
     printf 'dalzzack install: %s\n' "$1" >&2
@@ -95,6 +99,7 @@ main() {
     fi
 
     printf '\nNext, give your agents the usage guide:\n  dalzzack install all\n'
+    printf '\nTo update later:\n  dalzzack upgrade\n'
 }
 
 main

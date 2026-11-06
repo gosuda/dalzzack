@@ -1,9 +1,12 @@
 //! Daemon client — connects to a running daemon via TCP.
 
-use super::{pid_file_path, port_file_path, read_pid, read_port, DaemonRequest, DaemonResponse};
+use super::server::force_kill_pid;
+use super::{
+    daemon_process, force_end_hint, pid_file_path, port_file_path, process_ended, read_pid,
+    read_port, unverified_hint, DaemonProcess, DaemonRequest, DaemonResponse,
+};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-use std::process::Command;
 use std::time::Duration;
 
 /// Send a tool command to a running daemon instance.
@@ -98,14 +101,11 @@ pub fn stop_daemon(instance_id: &str) -> Result<serde_json::Value, serde_json::V
             Ok(out)
         }
         Err(e) => {
-            // If the daemon isn't running or isn't responsive, clean up stale
-            // files — but keep the pid file while that process still exists:
-            // it is what the `kill` this hint recommends needs.
-            let _ = std::fs::remove_file(port_file_path(instance_id));
-            let alive = read_pid(instance_id)
-                .and_then(crate::chrome::launch::process_identity)
-                .is_some();
-            if !alive {
+            // Clean up after a daemon that is gone. A daemon that only hangs
+            // keeps its files: they are how `kill` and the next `uninstall`
+            // find it.
+            if daemon_process(instance_id) == DaemonProcess::Gone {
+                let _ = std::fs::remove_file(port_file_path(instance_id));
                 let _ = std::fs::remove_file(pid_file_path(instance_id));
             }
             Err(serde_json::json!({
@@ -119,65 +119,72 @@ pub fn stop_daemon(instance_id: &str) -> Result<serde_json::Value, serde_json::V
 }
 
 /// Force-kill a daemon process by PID. Use this as an escape hatch when the
-/// daemon is wedged on a tool call and `stop` times out.
+/// daemon is wedged on a tool call and `stop` times out. It kills only the
+/// process that wrote the pid file.
 pub fn kill_daemon(instance_id: &str) -> Result<serde_json::Value, serde_json::Value> {
-    let pid = read_pid(instance_id);
     let port_file = port_file_path(instance_id);
     let pid_file = pid_file_path(instance_id);
 
-    if let Some(pid) = pid {
-        #[cfg(unix)]
-        {
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .stderr(std::process::Stdio::null())
-                .status();
-            std::thread::sleep(Duration::from_millis(500));
-            let _ = Command::new("kill")
-                .arg("-KILL")
-                .arg(pid.to_string())
-                .stderr(std::process::Stdio::null())
-                .status();
+    match daemon_process(instance_id) {
+        DaemonProcess::Running { pid, identity } => {
+            force_kill_pid(pid);
+            // `kill` returns before the system has ended the process.
+            let mut ended = process_ended(pid, &identity);
+            for _ in 0..20 {
+                if ended {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                ended = process_ended(pid, &identity);
+            }
+            if !ended {
+                return Err(serde_json::json!({
+                    "status": "failed",
+                    "error": "kill_failed",
+                    "id": instance_id,
+                    "pid": pid,
+                    "message": "The daemon is still running. A process with higher rights can refuse this.",
+                    "hint": force_end_hint(pid),
+                }));
+            }
+            let _ = std::fs::remove_file(&port_file);
+            let _ = std::fs::remove_file(&pid_file);
+            // A Chrome-engine daemon leaves Chrome running if only the daemon dies
+            // — and its throw-away profile on disk. `kill` bypasses the daemon, so
+            // it reaps both from the record the daemon left.
+            let chrome = crate::chrome::launch::reap(instance_id);
+            let profile_removed = crate::profile::remove_disposable_after_kill(instance_id);
+            Ok(serde_json::json!({
+                "status": "killed",
+                "id": instance_id,
+                "pid": pid,
+                "chrome": chrome,
+                "profile_removed": profile_removed,
+            }))
         }
-        #[cfg(windows)]
-        {
-            let _ = Command::new("taskkill")
-                .args(["/F", "/PID", &pid.to_string()])
-                // taskkill reports in the console code page; on stdout it would land
-                // in front of the JSON a runner is about to parse.
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
-        let _ = std::fs::remove_file(&port_file);
-        let _ = std::fs::remove_file(&pid_file);
-        // A Chrome-engine daemon leaves Chrome running if only the daemon dies
-        // — and its throw-away profile on disk. `kill` bypasses the daemon, so
-        // it reaps both from the record the daemon left.
-        let chrome = crate::chrome::launch::reap(instance_id);
-        let profile_removed = crate::profile::remove_disposable_after_kill(instance_id);
-        Ok(serde_json::json!({
-            "status": "killed",
+        DaemonProcess::Unverified(pid) => Err(serde_json::json!({
+            "status": "failed",
+            "error": "unverified_pid",
             "id": instance_id,
             "pid": pid,
-            "chrome": chrome,
-            "profile_removed": profile_removed,
-        }))
-    } else {
-        let _ = std::fs::remove_file(&port_file);
-        let _ = std::fs::remove_file(&pid_file);
-        // The daemon is gone already (crashed, or `list` cleaned up after
-        // it) — its Chrome and its throw-away profile may not be.
-        let chrome = crate::chrome::launch::reap(instance_id);
-        let profile_removed = crate::profile::remove_disposable_after_kill(instance_id);
-        Err(serde_json::json!({
-            "status": "no_pid_found",
-            "id": instance_id,
-            "message": "No PID file. Removed any stale port/pid files. Daemon may have crashed or was never started.",
-            "chrome": chrome,
-            "profile_removed": profile_removed,
-        }))
+            "message": "This pid file has no process identity, so the pid can belong to another program now. Nothing was killed.",
+            "hint": unverified_hint(pid),
+        })),
+        DaemonProcess::Gone => {
+            let _ = std::fs::remove_file(&port_file);
+            let _ = std::fs::remove_file(&pid_file);
+            // The daemon is gone already (crashed, or `list` cleaned up after
+            // it) — its Chrome and its throw-away profile may not be.
+            let chrome = crate::chrome::launch::reap(instance_id);
+            let profile_removed = crate::profile::remove_disposable_after_kill(instance_id);
+            Err(serde_json::json!({
+                "status": "no_pid_found",
+                "id": instance_id,
+                "message": "No daemon for this id. Removed any stale port/pid files. It may have crashed or was never started.",
+                "chrome": chrome,
+                "profile_removed": profile_removed,
+            }))
+        }
     }
 }
 
@@ -328,17 +335,25 @@ pub fn list_instances_json() -> serde_json::Value {
                         "expires_at_ms": get("expires_at_ms"),
                         "console_buffer": get("console_buffer"),
                     }));
+                } else if let DaemonProcess::Running { pid, .. } = daemon_process(&id) {
+                    // Not answering, but the same process runs: it hangs. Its
+                    // files are how `kill` finds it.
+                    instances.push(serde_json::json!({
+                        "id": id,
+                        "port": read_port(&id),
+                        "pid": pid,
+                        "status": "unresponsive",
+                        "hint": format!("Run: dalzzack kill --id {id}"),
+                    }));
                 } else {
-                    // Not alive — clean up stale port and pid files.
-                    let process_gone = read_pid(&id)
-                        .and_then(crate::chrome::launch::process_identity)
-                        .is_none();
+                    // Anything else is stale.
+                    let process = daemon_process(&id);
                     let _ = std::fs::remove_file(port_file_path(&id));
                     let _ = std::fs::remove_file(pid_file_path(&id));
                     // A Chrome-engine daemon that died left Chrome behind; once
                     // its record is the only trace left, this is the last
                     // chance to end it (identity-checked, never a reused pid).
-                    if process_gone {
+                    if process == DaemonProcess::Gone {
                         let _ = crate::chrome::launch::reap(&id);
                     }
                 }
