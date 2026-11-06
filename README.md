@@ -190,6 +190,31 @@ The guide is about 2.3 KB, because an agent pays for it in every session. It has
 
 The guide sits between `<!-- dalzzack-begin -->` and `<!-- dalzzack-end -->`. `dalzzack upgrade` keeps that block up to date, and `dalzzack install --refresh` does the same by hand. For other agents, copy [AGENTS.md](AGENTS.md) into their instruction file.
 
+## Uninstall
+
+```bash
+dalzzack uninstall                # print what would change, and change nothing
+dalzzack uninstall --yes          # apply it
+dalzzack uninstall --yes --purge  # also delete the data
+```
+
+`--yes` stops running daemons, removes the guide from the global Claude Code and Codex files, removes the `PATH` entry, and deletes this binary. The rest of each file stays. If a guide file holds nothing else, it goes too.
+
+| Item | `--yes` | `--yes --purge` |
+|---|---|---|
+| Guides, `PATH` entry, binary | Removed | Removed |
+| Screenshots, logs, and browser logins | Kept | Deleted |
+| Symbol cache and dumps in the temp folder | Kept | Deleted |
+
+The report names what stays, and why:
+
+- **Project guides.** dalzzack keeps no list of projects. Before the full uninstall, run `dalzzack uninstall --project --yes` in each project. It removes the guide from `./AGENTS.md` and changes nothing else.
+- **A `PATH` entry in a shared folder.** If other programs are in the folder, such as `~/.local/bin`, the entry stays, because they need it.
+- **Other copies.** The command deletes only the binary that runs it. `other_copies` lists any others on `PATH`.
+- **A binary in a protected folder.** The report gives the command to delete it as an administrator.
+
+If a step fails, the binary stays, so you can run `dalzzack uninstall --yes` again. dalzzack 1.0 has no `uninstall`, so run the install script first.
+
 ---
 
 ## Development

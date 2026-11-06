@@ -87,6 +87,34 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: cargo build --manifest-path src-tauri/Cargo.toml
+      # A throw-away runner is the only safe place for --purge on Windows:
+      # dalzzack finds these folders through the Known Folder API, so a test
+      # cannot redirect them.
+      - name: Check that uninstall leaves nothing (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'dalzzack'
+          $exe = Join-Path $dir 'dalzzack.exe'
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item src-tauri\target\debug\dalzzack.exe $exe
+          $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+          $before = $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          $key.SetValue('Path', "$($before.TrimEnd(';'));$dir", [Microsoft.Win32.RegistryValueKind]::ExpandString)
+          & $exe install all
+          if ($LASTEXITCODE -ne 0) { throw 'install all failed' }
+          $profile_dir = Join-Path $env:LOCALAPPDATA 'org.gosuda.dalzzack\EBWebView'
+          $logs = Join-Path $env:LOCALAPPDATA 'dalzzack\logs'
+          New-Item -ItemType Directory -Force -Path $profile_dir, $logs | Out-Null
+          & $exe uninstall --yes --purge
+          if ($LASTEXITCODE -ne 0) { throw 'uninstall failed' }
+          for ($i = 0; $i -lt 40 -and (Test-Path $dir); $i++) { Start-Sleep -Milliseconds 250 }
+          if (Test-Path $dir) { throw "$dir is still there" }
+          foreach ($path in "$env:LOCALAPPDATA\dalzzack", "$env:LOCALAPPDATA\org.gosuda.dalzzack", "$env:USERPROFILE\.claude\CLAUDE.md", "$env:USERPROFILE\.codex\AGENTS.md") {
+            if (Test-Path $path) { throw "$path is still there" }
+          }
+          $after = $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          if ($after -cne $before.TrimEnd(';')) { throw "The user Path changed: $after" }
 
   smoke:
     name: Smoke (${{ matrix.os }})
@@ -118,3 +146,25 @@ jobs:
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           bash scripts/smoke.sh
+      # On a throw-away runner this measures the real folders under ~/Library.
+      - name: Check that uninstall leaves nothing (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          dalzzack install all
+          dalzzack start --id uninstall-check --ttl 2m
+          dalzzack navigate -i uninstall-check --url "https://example.com" --timeout-ms 5000
+          dalzzack uninstall --yes --purge
+          if [ -e "$HOME/.cargo/bin/dalzzack" ]; then
+            echo "The binary is still there" >&2
+            exit 1
+          fi
+          left=$(find "$HOME/Library" -maxdepth 4 -iname '*dalzzack*' 2>/dev/null || true)
+          if [ -n "$left" ]; then
+            printf 'Still there:\n%s\n' "$left" >&2
+            exit 1
+          fi
+          if grep -rqs 'dalzzack-begin' "$HOME/.claude" "$HOME/.codex"; then
+            echo "A guide is still there" >&2
+            exit 1
+          fi

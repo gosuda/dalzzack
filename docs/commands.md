@@ -2,7 +2,7 @@
 
 Every command and flag, with platform notes. `dalzzack <command> --help` prints the same flags, and `dalzzack tools` prints them as JSON schemas. For agent-oriented usage rules, see [AGENTS.md](../AGENTS.md).
 
-All commands except `start`, `stop`, `list`, `run`, `guide`, `install`, `tools`, and `upgrade` require `--id <ID>` (`-i <ID>`) to target a browser instance.
+All commands except `start`, `stop`, `list`, `run`, `guide`, `install`, `tools`, `uninstall`, and `upgrade` require `--id <ID>` (`-i <ID>`) to target a browser instance.
 
 ## Instance management
 
@@ -28,6 +28,7 @@ All commands except `start`, `stop`, `list`, `run`, `guide`, `install`, `tools`,
 | `install claude-code\|codex\|codex-project\|all` | Add the short guide to an agent's instruction file. |
 | `install --refresh` | Rewrite the guide only in the global files that already have it. It creates no file. |
 | `upgrade [--check] [--force] [--tag TAG] [--keep-daemons]` | Check the latest release and replace this binary if it is older. `update` is the same command. It reads the tag from the `releases/latest` redirect, downloads the archive, checks its SHA-256 hash and the new binary's version, stops running daemons, replaces the binary, and refreshes the installed guides. A failed download changes nothing. `--check` prints the versions, `--force` reinstalls the same version, and `--tag` installs one tag. |
+| `uninstall [--yes] [--purge] [--project]` | Print what would change, and change nothing. `--yes` applies it: stops daemons, removes the guide from the global files, removes the `PATH` entry, and deletes this binary last. `--purge` also deletes the data folders, browser logins, and dalzzack's temp files. `--project` removes the guide from `./AGENTS.md` and changes nothing else, so run it in each project first. `left` lists what stays and why, and `other_copies` lists other binaries on `PATH`. After a failed step the binary stays, so the command can run again. |
 | `upgrade --path DIR \| --git URL [--rev REV] [--no-locked]` | Build from source with `cargo install --force`. Stops running daemons first. Needs cargo. If this binary is not the one cargo installs (a release binary, say), the result carries a `note` that names both copies. |
 
 ## Navigation & page state

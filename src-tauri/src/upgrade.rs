@@ -53,7 +53,7 @@ pub fn run(options: Options) -> Result<Value, Value> {
     }
 }
 
-fn failure(error: &str, message: impl std::fmt::Display, hint: &str) -> Value {
+pub(crate) fn failure(error: &str, message: impl std::fmt::Display, hint: &str) -> Value {
     json!({
         "status": "failed",
         "error": error,
@@ -261,7 +261,7 @@ fn replace_binary(new: &Path, target: &Path, move_aside: bool) -> std::io::Resul
 
 /// True for a binary in a cargo `target` folder: `upgrade` would replace a build
 /// that the next `cargo build` overwrites.
-fn is_dev_build(exe: &Path) -> bool {
+pub(crate) fn is_dev_build(exe: &Path) -> bool {
     let in_profile_dir = exe
         .parent()
         .and_then(Path::file_name)
@@ -416,7 +416,7 @@ fn cargo_on_path() -> bool {
 
 /// Same file, also when one path goes through a symlink or differs in case
 /// on a case-insensitive file system.
-fn same_path(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
@@ -589,7 +589,7 @@ fn cargo_install_target() -> PathBuf {
 }
 
 /// The name a running image is renamed to while it is replaced.
-fn moved_aside_path(target: &Path) -> PathBuf {
+pub(crate) fn moved_aside_path(target: &Path) -> PathBuf {
     let mut name = target.as_os_str().to_owned();
     name.push(".old");
     PathBuf::from(name)
@@ -619,7 +619,7 @@ pub fn sweep_moved_aside() {
 
 /// Scan the temp dir for `dalzzack-*.port` files and return the instance IDs.
 /// Doesn't ping — `stop_or_kill` will figure out whether a graceful shutdown works.
-fn list_running_instance_ids() -> Vec<String> {
+pub(crate) fn list_running_instance_ids() -> Vec<String> {
     let mut ids = Vec::new();
     if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
         for entry in entries.flatten() {
@@ -637,7 +637,7 @@ fn list_running_instance_ids() -> Vec<String> {
 
 /// Try graceful shutdown; if it errors out (hung daemon), force-kill by PID.
 /// Both calls are best-effort — we don't want a stuck daemon to block the upgrade.
-fn stop_or_kill(id: &str) {
+pub(crate) fn stop_or_kill(id: &str) {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dalzzack"));
     let stop = Command::new(&exe)
         .args(["stop", "--id", id])
@@ -645,10 +645,10 @@ fn stop_or_kill(id: &str) {
         .stderr(Stdio::null())
         .status();
     if matches!(stop, Ok(s) if s.success()) {
-        eprintln!("[upgrade]   stopped {}", id);
+        eprintln!("[dalzzack] stopped {}", id);
         return;
     }
-    eprintln!("[upgrade]   stop failed for {} — force-killing", id);
+    eprintln!("[dalzzack] stop failed for {} — force-killing", id);
     let _ = Command::new(&exe)
         .args(["kill", "--id", id])
         .stdout(Stdio::null())

@@ -48,6 +48,8 @@ pub mod tools;
 pub mod types;
 /// User-Agent resolution and engine-version detection.
 pub mod ua;
+/// `uninstall` — undo the install and the changes to agent files.
+pub mod uninstall;
 /// `upgrade` — replace the binary with the latest release.
 pub mod upgrade;
 pub mod webview;

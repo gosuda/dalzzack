@@ -1192,6 +1192,21 @@ enum Cli {
         no_locked: bool,
     },
 
+    /// Undo the install: stop daemons, then remove the guides, the PATH entry, and
+    /// this binary. Without --yes this prints the plan and changes nothing.
+    Uninstall {
+        /// Apply the plan.
+        #[arg(long)]
+        yes: bool,
+        /// Also delete the data folders: screenshots, logs, and browser logins.
+        #[arg(long)]
+        purge: bool,
+        /// Remove the guide from ./AGENTS.md and nothing else. Run this in each
+        /// project before the full uninstall.
+        #[arg(long, conflicts_with = "purge")]
+        project: bool,
+    },
+
     /// Run several steps in one call. With the id of a live instance, the steps run
     /// there and one result is printed. Otherwise this starts a browser, runs the
     /// steps, prints one line per step, and exits. A failed step stops the run.
@@ -1762,6 +1777,28 @@ fn main() {
             emit(&report, &filter, "", &serde_json::Value::Null);
             std::process::exit(code);
         }
+        Cli::Uninstall {
+            yes,
+            purge,
+            project,
+        } => {
+            let options = dalzzack_lib::uninstall::Options {
+                yes,
+                purge,
+                project,
+            };
+            let (report, code) = match dalzzack_lib::uninstall::run(options) {
+                Ok(report) => (report, 0),
+                Err(report) => (report, 1),
+            };
+            // Never through the output limit: that writes to the data folder.
+            if filter.is_active() {
+                emit(&report, &filter, "", &serde_json::Value::Null);
+            } else {
+                println!("{}", dalzzack_lib::cli::output::show(&report, &filter));
+            }
+            std::process::exit(code);
+        }
         // All tool commands → send to daemon via socket
         cmd => {
             let (id, tool_name, mut args) = cli_to_tool_call(cmd);
@@ -1840,6 +1877,7 @@ fn command_step(line: &serde_json::Value) -> Result<dalzzack_lib::cli::Step, Str
             | Cli::Install { .. }
             | Cli::Tools { .. }
             | Cli::Upgrade { .. }
+            | Cli::Uninstall { .. }
     ) {
         return Err("only commands that act on a page can be a step".to_string());
     }
@@ -2583,7 +2621,8 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
         | Cli::Guide { .. }
         | Cli::Install { .. }
         | Cli::Tools { .. }
-        | Cli::Upgrade { .. } => {
+        | Cli::Upgrade { .. }
+        | Cli::Uninstall { .. } => {
             unreachable!("handled in main()")
         }
     }
@@ -2889,6 +2928,7 @@ mod tests {
                 json!(["run", "--steps", "x.json"]),
                 json!(["guide"]),
                 json!(["upgrade"]),
+                json!(["uninstall", "--yes"]),
                 json!(["get-url", "-i", "other"]),
                 json!(["no-such-command"]),
                 json!(["click", 5]),

@@ -8,6 +8,11 @@ All notable changes to dalzzack. The format loosely follows
 
 ### Added
 
+- `dalzzack uninstall` undoes the install. Alone, it prints what would change and
+  changes nothing. `--yes` stops daemons, removes the guide from the global
+  Claude Code and Codex files, removes the `PATH` entry, and deletes the binary.
+  `--purge` also deletes data and browser logins. `--project` cleans only
+  `./AGENTS.md`, so it can run in each project first.
 - One-line install scripts, so installing no longer needs a list of commands:
   `scripts/install.sh` for macOS and `scripts/install.ps1` for Windows. Each
   downloads the latest release, checks its SHA-256 hash, and adds the binary to
@@ -61,7 +66,7 @@ All notable changes to dalzzack. The format loosely follows
 
 ### Fixed
 
-- `kill`, `start`, and `upgrade` could force-kill another program. A
+- `kill`, `start`, `upgrade`, and `uninstall` could force-kill another program. A
   pid file outlives its daemon over a restart, and the pid can then belong to
   anything. The pid file now holds the identity of its process, and dalzzack
   force-kills only that process.
