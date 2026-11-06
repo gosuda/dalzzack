@@ -13,6 +13,7 @@ All notable changes to dalzzack. The format loosely follows
   Claude Code and Codex files, removes the `PATH` entry, and deletes the binary.
   `--purge` also deletes data and browser logins. `--project` cleans only
   `./AGENTS.md`, so it can run in each project first.
+- `DALZZACK_VERSION` selects a release in the install scripts.
 - One-line install scripts, so installing no longer needs a list of commands:
   `scripts/install.sh` for macOS and `scripts/install.ps1` for Windows. Each
   downloads the latest release, checks its SHA-256 hash, and adds the binary to

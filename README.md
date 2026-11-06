@@ -85,6 +85,7 @@ To change this, set these environment variables before you run the script:
 
 - `DALZZACK_INSTALL_DIR`: the folder for the binary.
 - `DALZZACK_NO_MODIFY_PATH=1`: do not change `PATH`.
+- `DALZZACK_VERSION`: the release tag to install, such as a release candidate.
 
 Windows needs the WebView2 runtime, which Windows 11 already has.
 
