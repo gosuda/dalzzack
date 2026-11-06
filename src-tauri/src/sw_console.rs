@@ -954,6 +954,9 @@ pub(crate) unsafe fn read_session_id(
 mod tests {
     use super::*;
 
+    /// Tests run in parallel, and these share the global arm state.
+    static ARM_STATE_TESTS: Mutex<()> = Mutex::new(());
+
     #[test]
     fn console_args_flatten_to_one_line() {
         let params = json!({
@@ -987,6 +990,7 @@ mod tests {
 
     #[test]
     fn unarmed_read_reports_why_instead_of_empty_list() {
+        let _guard = ARM_STATE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         set_arm_state(ArmState::Failed(
             "Target.setAutoAttach not supported".into(),
         ));
@@ -1006,6 +1010,7 @@ mod tests {
     /// had actually captured — the exact failure this module exists to avoid.
     #[test]
     fn live_fallback_is_not_reported_as_unavailable() {
+        let _guard = ARM_STATE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         set_arm_state(ArmState::Failed("Target.setAutoAttach refused".into()));
         set_diag(|d| {
             d.sw_domain_ok = true;
