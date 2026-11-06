@@ -20,6 +20,8 @@ pub mod daemon;
 pub mod diagnostics;
 /// Which browser engine this daemon drives (`webview` or `chrome`).
 pub mod engine;
+/// The dalzzack block in an agent's instruction file.
+pub mod guide_file;
 /// Document-start script injection into a chosen JS world.
 pub mod inject;
 pub mod injection;

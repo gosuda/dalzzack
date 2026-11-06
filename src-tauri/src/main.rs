@@ -9,6 +9,7 @@
 // A GUI-only build would need it; we use the console subsystem instead.
 
 use clap::{Parser, Subcommand};
+use dalzzack_lib::guide_file::{codex_home, global_files, with_docs, BLOCK_BEGIN, BLOCK_END};
 use dalzzack_lib::state::home_dir;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -2588,12 +2589,6 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
     }
 }
 
-const DALZZACK_DOCS: &str = concat!(
-    "<!-- dalzzack-begin -->\n",
-    include_str!("../guide/core.md"),
-    "<!-- dalzzack-end -->\n"
-);
-
 /// The parts of the guide that `install` leaves out, so that an agent pays for
 /// them only when it needs them: name, what it covers, text.
 const GUIDE_TOPICS: [(&str, &str, &str); 11] = [
@@ -2685,46 +2680,6 @@ fn print_guide(topic: Option<&str>, all: bool) {
     }
 }
 
-const BLOCK_BEGIN: &str = "<!-- dalzzack-begin -->";
-const BLOCK_END: &str = "<!-- dalzzack-end -->";
-
-/// The text before and after the dalzzack block; `None` when there is no block.
-///
-/// Anything but one begin marker before one end marker is an error: without an
-/// end marker, the text after the begin marker is the user's own.
-fn split_around_block(text: &str) -> Result<Option<(&str, &str)>, String> {
-    let (begins, ends) = (
-        text.matches(BLOCK_BEGIN).count(),
-        text.matches(BLOCK_END).count(),
-    );
-    if begins == 0 && ends == 0 {
-        return Ok(None);
-    }
-    match (text.find(BLOCK_BEGIN), text.find(BLOCK_END)) {
-        (Some(begin), Some(end)) if begins == 1 && ends == 1 && begin < end => {
-            Ok(Some((&text[..begin], &text[end + BLOCK_END.len()..])))
-        }
-        _ => Err(format!(
-            "expected one {BLOCK_BEGIN} before one {BLOCK_END}, found {begins} and {ends}. \
-             Fix the markers by hand. The file was not changed."
-        )),
-    }
-}
-
-/// `existing` with its block replaced, or with a block added at the end.
-fn with_docs(existing: &str) -> Result<String, String> {
-    Ok(match split_around_block(existing)? {
-        Some((before, after)) => match after.trim_start_matches(['\r', '\n']) {
-            "" => format!("{before}{DALZZACK_DOCS}"),
-            after => format!("{before}{DALZZACK_DOCS}\n{after}"),
-        },
-        None => match existing.trim_end() {
-            "" => DALZZACK_DOCS.to_string(),
-            kept => format!("{kept}\n\n{DALZZACK_DOCS}"),
-        },
-    })
-}
-
 fn inject_docs(file_path: &std::path::Path, label: &str) {
     use std::fs;
 
@@ -2771,10 +2726,7 @@ fn fail_install(file: &std::path::Path, message: &str) -> ! {
 fn refresh_docs() {
     let mut refreshed = Vec::new();
     let mut failed = Vec::new();
-    for path in [
-        home_dir().join(".claude").join("CLAUDE.md"),
-        codex_home().join("AGENTS.md"),
-    ] {
+    for path in global_files() {
         let Ok(existing) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -2827,14 +2779,6 @@ fn looks_shell_path_converted(v: &str) -> bool {
         && (b[2] == b'/' || b[2] == b'\\');
     has_drive
         && (v.contains("/Git/") || v.contains("\\Git\\") || v.to_ascii_lowercase().contains("msys"))
-}
-
-/// Where Codex keeps its global files: `$CODEX_HOME`, else `~/.codex`.
-fn codex_home() -> PathBuf {
-    std::env::var_os("CODEX_HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".codex"))
 }
 
 fn install_docs(target: &str) {
@@ -2910,6 +2854,7 @@ fn install_docs(target: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dalzzack_lib::guide_file::DALZZACK_DOCS;
 
     /// A debug build needs more stack to parse a command line than a test thread
     /// has. `main` has this much too.
@@ -2995,39 +2940,6 @@ mod tests {
         for (name, about, text) in GUIDE_TOPICS {
             assert!(DALZZACK_DOCS.contains(name), "{name}");
             assert!(!about.is_empty() && !text.trim().is_empty(), "{name}");
-        }
-    }
-
-    #[test]
-    fn the_guide_replaces_its_own_block_and_leaves_the_rest() {
-        let file = format!("# Mine\r\n\r\n{BLOCK_BEGIN}\nOLD GUIDE\n{BLOCK_END}\n\n# Also mine\n");
-        let updated = with_docs(&file).unwrap();
-        assert!(updated.starts_with("# Mine\r\n\r\n"));
-        assert!(updated.ends_with("\n# Also mine\n"));
-        assert!(updated.contains(DALZZACK_DOCS));
-        assert!(!updated.contains("OLD GUIDE"));
-        // Running it again changes nothing.
-        assert_eq!(with_docs(&updated).unwrap(), updated);
-    }
-
-    #[test]
-    fn the_guide_goes_at_the_end_of_a_file_without_a_block() {
-        assert_eq!(with_docs("").unwrap(), DALZZACK_DOCS);
-        assert_eq!(
-            with_docs("# Mine\n\n").unwrap(),
-            format!("# Mine\n\n{DALZZACK_DOCS}")
-        );
-    }
-
-    #[test]
-    fn a_broken_block_changes_nothing() {
-        for file in [
-            format!("{BLOCK_BEGIN}\nmy notes, with no end marker\n"),
-            format!("{BLOCK_END}\nthe wrong order\n{BLOCK_BEGIN}\n"),
-            format!("{BLOCK_BEGIN}\n{BLOCK_END}\n{BLOCK_BEGIN}\n{BLOCK_END}\n"),
-            format!("only an end marker {BLOCK_END}\n"),
-        ] {
-            assert!(with_docs(&file).is_err(), "{file}");
         }
     }
 
