@@ -155,6 +155,8 @@ jobs:
           dalzzack start --id uninstall-check --ttl 2m
           dalzzack navigate -i uninstall-check --url "https://example.com" --timeout-ms 5000
           dalzzack uninstall --yes --purge
+          # bash remembers the path of a command it ran, and command -v repeats it.
+          hash -r
           if command -v dalzzack >/dev/null; then
             echo "The binary is still there" >&2
             exit 1
