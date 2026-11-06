@@ -61,6 +61,12 @@ All notable changes to dalzzack. The format loosely follows
 
 ### Fixed
 
+- `kill`, `start`, and `upgrade` could force-kill another program. A
+  pid file outlives its daemon over a restart, and the pid can then belong to
+  anything. The pid file now holds the identity of its process, and dalzzack
+  force-kills only that process.
+- `list` and `stop` deleted the files of a daemon that hung, so `kill` could not
+  find it.
 - `navigate`, `describe`, and `screenshot` failed with `os error 5` when the binary
   was in a folder that cannot be written.
 - `get-html` turned non-ASCII text into mojibake, deleted the text after `style=""`,

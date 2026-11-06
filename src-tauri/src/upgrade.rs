@@ -380,10 +380,20 @@ fn from_release(options: &Options) -> Result<Value, Value> {
         "from": CURRENT_VERSION,
         "to": tag.trim_start_matches('v'),
         "installed_to": crate::state::printable_path(&target),
-        "stopped_daemons": alive,
     });
+    report_daemons(&mut out, &alive);
     refresh_guides(&mut out, &target);
     Ok(out)
+}
+
+/// `kill` refuses a daemon it cannot prove, so "asked to stop" is not "stopped".
+fn report_daemons(out: &mut Value, ids: &[String]) {
+    let left = list_running_instance_ids();
+    let stopped: Vec<&String> = ids.iter().filter(|id| !left.contains(id)).collect();
+    out["stopped_daemons"] = json!(stopped);
+    if !left.is_empty() {
+        out["daemons_left"] = json!(left);
+    }
 }
 
 fn daemons_running(ids: Vec<String>) -> Value {
@@ -546,9 +556,9 @@ fn from_source(options: Options) -> Result<Value, Value> {
 
     let mut out = json!({
         "status": "upgraded",
-        "stopped_daemons": alive,
         "installed_to": install_target.display().to_string(),
     });
+    report_daemons(&mut out, &alive);
     // A binary from a release archive lives outside cargo's bin directory, so
     // the new build did not replace it and the old copy may still win on PATH.
     if let Some(exe) = running_from.filter(|exe| !same_path(exe, &install_target)) {

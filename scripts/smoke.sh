@@ -12,7 +12,7 @@ export DALZZACK_OUTPUT=full
 
 ID="smoke-$$"
 WORKDIR=$(mktemp -d -t dalzzack-smoke-XXXXXX)
-trap 'dalzzack stop --id "$ID" >/dev/null 2>&1 || true; rm -rf "$WORKDIR"' EXIT
+trap 'dalzzack stop --id "$ID" >/dev/null 2>&1 || true; dalzzack stop --id "$ID-kill" >/dev/null 2>&1 || true; rm -rf "$WORKDIR"' EXIT
 
 step() { printf '\n== %s ==\n' "$*"; }
 assert_status() {
@@ -131,5 +131,13 @@ fi
 
 step "stop daemon"
 dalzzack stop --id "$ID"
+
+step "kill ends a real daemon"
+dalzzack start --id "$ID-kill" >/dev/null
+KILLED=$(dalzzack kill --id "$ID-kill")
+if ! printf '%s' "$KILLED" | grep -Eq '"status": *"killed"'; then
+  printf 'FAIL: expected status=killed\nresponse:\n%s\n' "$KILLED" >&2
+  exit 1
+fi
 
 printf '\nOK — smoke test passed.\n'

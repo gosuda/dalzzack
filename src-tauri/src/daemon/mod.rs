@@ -19,6 +19,7 @@ pub(crate) use server::{
     run_tcp_server, set_daemon_config, set_renderer_health, startup_error_path,
 };
 
+use crate::chrome::launch::process_identity;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -59,10 +60,87 @@ pub fn read_port(instance_id: &str) -> Option<u16> {
 
 /// Read the PID from the PID file for a given instance ID.
 pub fn read_pid(instance_id: &str) -> Option<u32> {
-    let path = pid_file_path(instance_id);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
+    read_pid_file(instance_id).map(|record| record.0)
+}
+
+fn read_pid_file(instance_id: &str) -> Option<(u32, Option<String>)> {
+    let text = std::fs::read_to_string(pid_file_path(instance_id)).ok()?;
+    parse_pid_file(&text)
+}
+
+/// The pid, then on a second line the identity of that process. A file from
+/// before 1.1 has only the pid.
+fn parse_pid_file(text: &str) -> Option<(u32, Option<String>)> {
+    let mut lines = text.lines().map(str::trim);
+    let pid = lines.next()?.parse().ok()?;
+    let identity = lines.next().filter(|line| !line.is_empty());
+    Some((pid, identity.map(str::to_string)))
+}
+
+/// What this process writes to its pid file.
+pub(crate) fn pid_file_text(pid: u32) -> String {
+    match process_identity(pid) {
+        Some(identity) => format!("{pid}\n{identity}\n"),
+        None => pid.to_string(),
+    }
+}
+
+/// Whether the daemon that wrote a pid file still runs.
+///
+/// A pid alone proves nothing: the file outlives its daemon over a restart, and
+/// the pid can then belong to another program. So nothing force-kills a pid
+/// unless this answers `Running`.
+#[derive(Debug, PartialEq)]
+pub enum DaemonProcess {
+    /// The process that wrote the file still runs.
+    Running { pid: u32, identity: String },
+    /// There is no file, or its pid names no process or another process.
+    Gone,
+    /// A process has this pid, but the file has no identity to compare.
+    Unverified(u32),
+}
+
+pub fn daemon_process(instance_id: &str) -> DaemonProcess {
+    classify(read_pid_file(instance_id), process_identity)
+}
+
+fn classify(
+    record: Option<(u32, Option<String>)>,
+    identity_of: impl Fn(u32) -> Option<String>,
+) -> DaemonProcess {
+    let Some((pid, written)) = record else {
+        return DaemonProcess::Gone;
+    };
+    match (written, identity_of(pid)) {
+        (Some(written), Some(current)) if written == current => DaemonProcess::Running {
+            pid,
+            identity: written,
+        },
+        (None, Some(_)) => DaemonProcess::Unverified(pid),
+        _ => DaemonProcess::Gone,
+    }
+}
+
+/// True once `pid` no longer names the process with this identity.
+pub(crate) fn process_ended(pid: u32, identity: &str) -> bool {
+    process_identity(pid).as_deref() != Some(identity)
+}
+
+/// The command for a user to end a daemon that dalzzack cannot end.
+pub(crate) fn force_end_hint(pid: u32) -> String {
+    if cfg!(windows) {
+        format!("From an administrator terminal, run: taskkill /F /PID {pid}")
+    } else {
+        format!("Run: sudo kill -9 {pid}")
+    }
+}
+
+/// For a pid that may belong to another program, so the check comes first.
+pub(crate) fn unverified_hint(pid: u32) -> String {
+    format!(
+        "Check that pid {pid} is dalzzack before you end it. {} `dalzzack list` clears this record.",
+        force_end_hint(pid)
+    )
 }
 
 /// JSON protocol: request sent over socket
@@ -82,6 +160,72 @@ pub struct DaemonResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn identity_is(current: &'static str) -> impl Fn(u32) -> Option<String> {
+        move |_| Some(current.to_string())
+    }
+
+    fn no_process(_: u32) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn a_pid_file_has_a_pid_and_an_identity() {
+        assert_eq!(
+            parse_pid_file("42\n133912\n"),
+            Some((42, Some("133912".to_string())))
+        );
+        assert_eq!(
+            parse_pid_file("42\r\nMon Nov  6 10:00:00 2026\r\n"),
+            Some((42, Some("Mon Nov  6 10:00:00 2026".to_string())))
+        );
+    }
+
+    #[test]
+    fn a_pid_file_from_before_1_1_has_only_a_pid() {
+        assert_eq!(parse_pid_file("42"), Some((42, None)));
+        assert_eq!(parse_pid_file("42\n"), Some((42, None)));
+        assert_eq!(parse_pid_file("42\n\n"), Some((42, None)));
+        assert_eq!(parse_pid_file("not a pid"), None);
+        assert_eq!(parse_pid_file(""), None);
+    }
+
+    #[test]
+    fn only_the_same_process_counts_as_running() {
+        assert_eq!(
+            classify(Some((42, Some("a".to_string()))), identity_is("a")),
+            DaemonProcess::Running {
+                pid: 42,
+                identity: "a".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_reused_pid_is_not_the_daemon() {
+        assert_eq!(
+            classify(Some((42, Some("a".to_string()))), identity_is("b")),
+            DaemonProcess::Gone
+        );
+    }
+
+    #[test]
+    fn a_pid_with_no_process_is_gone() {
+        assert_eq!(
+            classify(Some((42, Some("a".to_string()))), no_process),
+            DaemonProcess::Gone
+        );
+        assert_eq!(classify(Some((42, None)), no_process), DaemonProcess::Gone);
+        assert_eq!(classify(None, identity_is("a")), DaemonProcess::Gone);
+    }
+
+    #[test]
+    fn a_pid_with_no_identity_cannot_be_proved() {
+        assert_eq!(
+            classify(Some((42, None)), identity_is("a")),
+            DaemonProcess::Unverified(42)
+        );
+    }
 
     #[test]
     fn test_port_file_path_format() {

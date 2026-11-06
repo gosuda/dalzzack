@@ -239,6 +239,7 @@ fn list(result: &Value) -> Value {
                 "renderer_error",
                 "current_url",
                 "last_used",
+                "hint",
             ] {
                 short.insert(key.to_string(), instance[key].clone());
             }

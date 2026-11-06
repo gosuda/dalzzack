@@ -752,6 +752,44 @@ const tests = {
     }
   },
 
+  async "kill-real-daemon"() {
+    run(`start --id ${INSTANCE_ID}`);
+    await sleep(2000);
+    const result = run(`kill --id ${INSTANCE_ID}`);
+    assert(result.parsed?.status === "killed", `Expected killed, got: ${result.output}`);
+    assert(!run("list").output.includes(INSTANCE_ID), "The daemon should be gone");
+  },
+
+  // A pid file can outlive its daemon. The pid then belongs to another program,
+  // and only the process that wrote the file may be killed.
+  async "kill-spares-another-process"() {
+    const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    const id = `stale-${Date.now()}`;
+    const portFile = join(tmpdir(), `dalzzack-${id}.port`);
+    const pidFile = join(tmpdir(), `dalzzack-${id}.pid`);
+    const isAlive = () => {
+      try {
+        process.kill(other.pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      await sleep(300);
+      for (const record of [`${other.pid}\nanother process\n`, `${other.pid}`]) {
+        writeFileSync(portFile, "1");
+        writeFileSync(pidFile, record);
+        run(`kill --id ${id}`, { expectFail: true });
+        await sleep(500);
+        assert(isAlive(), `kill ended another process, with the pid file ${JSON.stringify(record)}`);
+      }
+    } finally {
+      other.kill();
+      cleanup([portFile, pidFile]);
+    }
+  },
+
   async "error-no-instance"() {
     const result = run(`navigate -i nonexistent-instance --url "https://example.com"`, {
       expectFail: true,

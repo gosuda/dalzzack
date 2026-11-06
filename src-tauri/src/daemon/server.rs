@@ -1,6 +1,9 @@
 //! Daemon server — runs inside the Tauri process, listens on a TCP port.
 
-use super::{pid_file_path, port_file_path, read_pid, read_port, DaemonRequest, DaemonResponse};
+use super::{
+    daemon_process, pid_file_path, pid_file_text, port_file_path, read_port, DaemonProcess,
+    DaemonRequest, DaemonResponse,
+};
 use std::io::{BufRead, Write};
 use std::net::TcpStream;
 use std::process::Command;
@@ -279,7 +282,7 @@ fn ping_daemon_info(port: u16) -> Option<serde_json::Value> {
 /// Try to kill a possibly-stuck daemon process by PID. Sends SIGTERM first
 /// (so any cleanup hooks fire), waits briefly, then SIGKILL if still alive.
 /// No-op on platforms without `kill`.
-fn force_kill_pid(pid: u32) {
+pub(super) fn force_kill_pid(pid: u32) {
     #[cfg(unix)]
     {
         // SIGTERM first so any cleanup hooks can run; SIGKILL after a short
@@ -493,8 +496,8 @@ pub fn start_daemon(
                 instance_id,
                 port
             );
-            if let Some(old_pid) = read_pid(instance_id) {
-                force_kill_pid(old_pid);
+            if let DaemonProcess::Running { pid, .. } = daemon_process(instance_id) {
+                force_kill_pid(pid);
             }
             // A Chrome-engine daemon killed this way leaves Chrome behind,
             // and the new daemon would overwrite its record.
@@ -1084,7 +1087,7 @@ pub(crate) async fn run_tcp_server(instance_id: &str) -> anyhow::Result<()> {
     }
 
     // Write our own PID so `start --id` can force-kill us if we go unresponsive.
-    let _ = std::fs::write(&pid_file, std::process::id().to_string());
+    let _ = std::fs::write(&pid_file, pid_file_text(std::process::id()));
 
     // Bind to a random available port on localhost
     let listener = TcpListener::bind("127.0.0.1:0").await?;
