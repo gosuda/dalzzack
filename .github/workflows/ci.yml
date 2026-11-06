@@ -155,7 +155,7 @@ jobs:
           dalzzack start --id uninstall-check --ttl 2m
           dalzzack navigate -i uninstall-check --url "https://example.com" --timeout-ms 5000
           dalzzack uninstall --yes --purge
-          if [ -e "$HOME/.cargo/bin/dalzzack" ]; then
+          if command -v dalzzack >/dev/null; then
             echo "The binary is still there" >&2
             exit 1
           fi
