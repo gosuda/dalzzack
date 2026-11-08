@@ -4,7 +4,7 @@ All notable changes to dalzzack. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [SemVer](https://semver.org).
 
-## [1.2.0] - Unreleased
+## [1.2.0] - 2026-11-08
 
 ### Added
 
