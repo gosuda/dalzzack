@@ -5,6 +5,9 @@
 pub struct NavigateResult {
     pub url: String,
     pub title: Option<String>,
+    /// The engine reported that the main-frame load failed: the fields of
+    /// [`crate::main_frame::Failure::to_json`].
+    pub failure: Option<serde_json::Value>,
 }
 
 /// Wait for selector result

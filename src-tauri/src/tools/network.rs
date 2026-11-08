@@ -85,6 +85,67 @@ pub async fn tool_navigation_log(args: &Value) -> Result<Value> {
     }))
 }
 
+/// `failed-requests` on WKWebView. There is no network stream, but the
+/// navigation delegate sees every main-frame load that failed, so answer with
+/// those, and say that nothing else is covered.
+fn webkit_failed_requests(args: &Value) -> Value {
+    let since = args
+        .get("since_ms")
+        .and_then(|v| v.as_u64())
+        .map(since_to_epoch);
+    let pattern = arg_str(args, "url_pattern");
+    let documents =
+        arg_str(args, "resource_type").is_none_or(|t| t.eq_ignore_ascii_case("document"));
+    let include_canceled = arg_bool(args, "include_canceled");
+    let max = args
+        .get("max")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50)
+        .clamp(1, 1000) as usize;
+    let mut canceled_hidden = 0usize;
+    let mut failures: Vec<Value> = crate::main_frame::all()
+        .into_iter()
+        .filter(|f| documents && since.is_none_or(|t| f.ts_ms >= t))
+        .filter(|f| {
+            pattern.is_none_or(|p| {
+                f.failing_url
+                    .as_deref()
+                    .is_some_and(|u| crate::response_headers::url_matches(u, p))
+            })
+        })
+        .filter(|f| {
+            let hide = f.canceled && !include_canceled;
+            canceled_hidden += usize::from(hide);
+            !hide
+        })
+        .map(|f| {
+            let mut v = f.to_json();
+            v["kind"] = json!(if f.canceled {
+                "canceled"
+            } else {
+                "network_error"
+            });
+            v["resource_type"] = json!("Document");
+            v["url"] = json!(f.failing_url);
+            v["ts_ms"] = json!(f.ts_ms);
+            v
+        })
+        .collect();
+    let keep = failures.len().saturating_sub(max);
+    failures.drain(..keep);
+    json!({
+        "status": "completed",
+        "engine": crate::engine::current().as_str(),
+        "coverage": "main_frame_only",
+        "returned": failures.len(),
+        "summary": { "canceled_hidden": canceled_hidden },
+        "failures": failures,
+        "hint": "WKWebView has no network event stream: only main-frame document loads that \
+                 failed are recorded here. Failed subresources, fetch calls, and WebSockets are \
+                 not.",
+    })
+}
+
 /// `--since-ms` is "this many ms ago" on the network tools (same as
 /// `network-log`); the store wants an epoch.
 fn since_to_epoch(ago_ms: u64) -> u64 {
@@ -95,6 +156,9 @@ fn since_to_epoch(ago_ms: u64) -> u64 {
 /// images, documents, fetch, …) with their URLs, plus HTTP errors.
 pub async fn tool_failed_requests(args: &Value) -> Result<Value> {
     if !crate::netlog::is_armed() {
+        if crate::main_frame::webkit_capture() {
+            return Ok(webkit_failed_requests(args));
+        }
         return Ok(unarmed_payload("failed-requests"));
     }
     let q = crate::netlog::FailQuery {

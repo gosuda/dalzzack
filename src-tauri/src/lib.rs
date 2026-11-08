@@ -27,6 +27,8 @@ pub mod inject;
 pub mod injection;
 pub mod intercept;
 pub mod logging;
+/// Main-frame loads that failed, on every engine (`navigate`, `wait-navigation`).
+pub mod main_frame;
 /// Always-on request index and navigation timeline (`nav-log`,
 /// `failed-requests`, `list`'s current URL).
 pub mod netlog;

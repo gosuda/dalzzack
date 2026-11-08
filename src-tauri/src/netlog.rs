@@ -530,6 +530,23 @@ pub fn ingest(event: &str, params: &Value) {
                     h.blocked_reason = blocked.clone();
                 }
             });
+            // A top-level document that failed is what `navigate` and
+            // `wait-navigation` must report (see `crate::main_frame`).
+            let main = s.main_frame_id.clone();
+            let failed_document = s
+                .nav_records
+                .get(&id)
+                .filter(|r| main.is_none() || r.frame_id.is_none() || r.frame_id == main)
+                .map(|r| r.url().to_string());
+            if let Some(url) = failed_document {
+                crate::main_frame::record(crate::main_frame::Failure {
+                    ts_ms,
+                    failing_url: Some(url),
+                    message: error_text.clone().unwrap_or_default(),
+                    canceled,
+                    ..Default::default()
+                });
+            }
             // A CORS-blocked response never reaches `responseReceived`, but its
             // wire headers — and so its status — did arrive.
             let needs_status = s
@@ -921,6 +938,10 @@ fn navigation_json(s: &Store, r: &RequestRecord, with_headers: bool, redact: boo
     // challenge seen" are answers. The rest is noise when empty.
     if let Some(obj) = v.as_object_mut() {
         obj.retain(|k, val| !val.is_null() || k == "status" || k == "challenge");
+        // Only a cancellation is worth a field: another load replaced this one.
+        if r.canceled {
+            obj.insert("canceled".into(), json!(true));
+        }
     }
     v
 }

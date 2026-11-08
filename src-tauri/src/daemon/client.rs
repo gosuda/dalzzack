@@ -334,6 +334,7 @@ pub fn list_instances_json() -> serde_json::Value {
                         "ttl_s": get("ttl_s"),
                         "expires_at_ms": get("expires_at_ms"),
                         "console_buffer": get("console_buffer"),
+                        "load_failure_capture": get("load_failure_capture"),
                     }));
                 } else if let DaemonProcess::Running { pid, .. } = daemon_process(&id) {
                     // Not answering, but the same process runs: it hangs. Its

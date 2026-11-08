@@ -1232,6 +1232,9 @@ async fn handle_connection(
                 // it is the difference between "no violations" and "no
                 // enforcement".
                 "csp_bypassed": crate::state::csp_bypassed(),
+                // What sees a main-frame load that failed: the CDP network
+                // stream, the WKWebView delegate, or nothing.
+                "load_failure_capture": crate::main_frame::capture_word(),
             }),
         };
         let resp_str = serde_json::to_string(&resp)?;

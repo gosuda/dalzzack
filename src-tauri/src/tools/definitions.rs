@@ -193,7 +193,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "navigate".to_string(),
-            description: "Navigate the browser to a URL and wait for the page to load.".to_string(),
+            description: "Navigate the browser to a URL and wait for the page to load. A main-frame load that failed (a refused certificate, DNS, a refused connection) returns `status: failed`, `error: NAVIGATION_FAILED`, with `failing_url` and `error_text` (WebView2, Chrome) or `error_domain`, `error_code`, and `trust_error` (WKWebView).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -706,7 +706,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "failed_requests".to_string(),
-            description: "Every request that failed — of ANY resource type (document, script, stylesheet, image, font, fetch, …) — WITH its URL, which CDP's `loadingFailed` never carries. Each entry is classified: `blocked` (CSP/mixed content/inspector, with `blocked_reason`), `cors` (`cors_error`), `network_error` (DNS/TLS/connection, `error_text` like `net::ERR_CONNECTION_RESET`), `http_error` (status >= 400; omit with `no_http_errors`), `canceled` (hidden unless `include_canceled` — navigating away and ad slots produce lots). Carries initiator and frame. Always on, daemon-memory read. Use it instead of `get_captured_requests` (fetch/XHR only, in-page hook) when a script, image or iframe silently failed to load.".to_string(),
+            description: "Every request that failed — of ANY resource type (document, script, stylesheet, image, font, fetch, …) — WITH its URL, which CDP's `loadingFailed` never carries. Each entry is classified: `blocked` (CSP/mixed content/inspector, with `blocked_reason`), `cors` (`cors_error`), `network_error` (DNS/TLS/connection, `error_text` like `net::ERR_CONNECTION_RESET`), `http_error` (status >= 400; omit with `no_http_errors`), `canceled` (hidden unless `include_canceled` — navigating away and ad slots produce lots). Carries initiator and frame. Always on, daemon-memory read. Use it instead of `get_captured_requests` (fetch/XHR only, in-page hook) when a script, image or iframe silently failed to load. On macOS WKWebView, which has no network stream, only main-frame loads that failed (`coverage: main_frame_only`).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1000,6 +1000,9 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 // ============================================================================
 
 pub async fn execute_tool(name: &str, args: &Value) -> Result<Value> {
+    if crate::main_frame::starts_navigation(name) {
+        crate::main_frame::note_action();
+    }
     // The Chrome engine implements a few tools itself (input, frames,
     // navigation, WebView2-only diagnostics); everything else is shared and
     // reaches Chrome through the engine-aware JS executor.
@@ -1857,12 +1860,28 @@ async fn tool_navigate(args: &Value) -> Result<Value> {
     let seq_before = crate::netlog::last_seq();
 
     // Navigate the WebView to the URL
-    match webview_navigate(url, timeout_ms).await {
+    let navigated = webview_navigate(url, timeout_ms).await;
+    // Whatever failed during this call is this call's to report.
+    crate::main_frame::consume();
+    match navigated {
         Ok(result) => {
             // Update CURRENT_SITE
             {
                 let mut current = CURRENT_SITE.write().await;
                 *current = Some(site.to_string());
+            }
+
+            if let Some(failure) = result.failure {
+                return Ok(failed_navigation(url, &failure, &Value::Null));
+            }
+            let report = crate::tools::network::navigation_report(seq_before, Some(url));
+            if crate::main_frame::document_failed(&report["document"]) {
+                let failure = serde_json::json!({
+                    "failing_url": report["document"]["final_url"],
+                    "error_text": report["document"]["error_text"],
+                    "message": report["document"]["error_text"],
+                });
+                return Ok(failed_navigation(url, &failure, &report));
             }
 
             let mut out = serde_json::json!({
@@ -1873,10 +1892,7 @@ async fn tool_navigate(args: &Value) -> Result<Value> {
             // The main document's status and every hop it went through — a
             // challenge that solved itself used to come back as a plain
             // `completed` with only the final page to show for it.
-            if let (Some(obj), Some(report)) = (
-                out.as_object_mut(),
-                crate::tools::network::navigation_report(seq_before, Some(url)).as_object(),
-            ) {
+            if let (Some(obj), Some(report)) = (out.as_object_mut(), report.as_object()) {
                 for (k, v) in report {
                     obj.insert(k.clone(), v.clone());
                 }
@@ -1899,6 +1915,37 @@ async fn tool_navigate(args: &Value) -> Result<Value> {
             }))
         }
     }
+}
+
+/// The result of a navigation whose main-frame load failed. `failure` holds
+/// the fields of [`crate::main_frame::Failure::to_json`]; `report` is the
+/// navigation report, when there is one.
+pub(crate) fn failed_navigation(url: &str, failure: &Value, report: &Value) -> Value {
+    let mut out = serde_json::json!({
+        "status": "failed",
+        "error": "NAVIGATION_FAILED",
+        "url": url,
+        "engine": crate::engine::current().as_str(),
+    });
+    if let (Some(obj), Some(report)) = (out.as_object_mut(), report.as_object()) {
+        for (k, v) in report.iter().filter(|(k, _)| k.as_str() != "hint") {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    if let (Some(obj), Some(failure)) = (out.as_object_mut(), failure.as_object()) {
+        for (k, v) in failure.iter().filter(|(_, v)| !v.is_null()) {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    if out["message"].as_str().is_none_or(str::is_empty) {
+        out["message"] = serde_json::json!("the page did not load");
+    }
+    out["hint"] = serde_json::json!(
+        "The page did not load. The window does not show this URL: it still shows the page \
+         before it, or the browser's own error page. `get-text` and `describe` read that page, \
+         not this site."
+    );
+    out
 }
 
 /// get_html — fetch page HTML.
@@ -3249,6 +3296,10 @@ async fn tool_wait_navigation(args: &Value) -> Result<Value> {
             last_url = url.clone();
         }
 
+        if let Some(failed) = failed_wait(&before_url, &last_url, start).await {
+            return Ok(failed);
+        }
+
         if !committed {
             let sentinel_gone = sentinel == Some(false);
             let url_changed =
@@ -3259,6 +3310,7 @@ async fn tool_wait_navigation(args: &Value) -> Result<Value> {
         if committed {
             match &to {
                 None => {
+                    crate::main_frame::consume();
                     return Ok(navigation_result(
                         &before_url,
                         &last_url,
@@ -3266,10 +3318,11 @@ async fn tool_wait_navigation(args: &Value) -> Result<Value> {
                         start,
                         true,
                         false,
-                    ))
+                    ));
                 }
                 // Re-checked every poll, not only on the poll that saw the swap.
                 Some(t) if last_url.contains(t.as_str()) => {
+                    crate::main_frame::consume();
                     return Ok(navigation_result(
                         &before_url,
                         &last_url,
@@ -3277,7 +3330,7 @@ async fn tool_wait_navigation(args: &Value) -> Result<Value> {
                         start,
                         true,
                         false,
-                    ))
+                    ));
                 }
                 // Redirect chain still in flight — keep waiting.
                 Some(_) => {}
@@ -3294,6 +3347,10 @@ async fn tool_wait_navigation(args: &Value) -> Result<Value> {
             last_url = u;
         }
     }
+    if let Some(failed) = failed_wait(&before_url, &last_url, start).await {
+        return Ok(failed);
+    }
+    crate::main_frame::consume();
     if let Some(t) = &to {
         if last_url.contains(t.as_str()) {
             return Ok(navigation_result(
@@ -3336,6 +3393,27 @@ async fn tool_wait_navigation(args: &Value) -> Result<Value> {
 /// `navigated` says whether the document swap was actually witnessed;
 /// `matched_late` marks a destination that was only confirmed by the final
 /// out-of-band check, so a caller can tell a clean detection from a rescue.
+/// A main-frame load that failed since the last action, as a failed
+/// `wait-navigation` result, unless an earlier call reported it. Such a load
+/// never replaces the document (WebKit), or replaces it with the browser's
+/// error page (WebView2, Chrome).
+async fn failed_wait(
+    before_url: &str,
+    current_url: &str,
+    start: std::time::Instant,
+) -> Option<Value> {
+    let failure = crate::main_frame::unreported()?;
+    let failure = crate::main_frame::settled(failure).await;
+    crate::main_frame::consume();
+    let url = failure.failing_url.clone().unwrap_or_default();
+    let mut out = failed_navigation(&url, &failure.to_json(), &Value::Null);
+    out["navigated"] = serde_json::json!(false);
+    out["before_url"] = serde_json::json!(before_url);
+    out["current_url"] = serde_json::json!(current_url);
+    out["elapsed_ms"] = serde_json::json!(start.elapsed().as_millis() as u64);
+    Some(out)
+}
+
 fn navigation_result(
     before_url: &str,
     after_url: &str,

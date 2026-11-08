@@ -29,12 +29,20 @@ pub async fn webview_navigate(
 
     // Clear CDP Context Store (clean up previous page's ExecutionContexts)
     clear_cdp_context_store().await;
-
-    // macOS: WKWebView loadRequest
+    // Only a failure recorded after this can be this load's.
     #[cfg(target_os = "macos")]
-    {
-        webview_navigate_macos(&window, parsed_url.as_str())?;
-    }
+    let failures_before = crate::main_frame::last_seq();
+
+    // macOS: WKWebView loadRequest. The WKNavigation it returns is how a
+    // failure reported by the delegate is matched to this load.
+    #[cfg(target_os = "macos")]
+    let navigation = {
+        let rx = webview_navigate_macos(&window, parsed_url.as_str())?;
+        match tokio::time::timeout(tokio::time::Duration::from_secs(3), rx).await {
+            Ok(Ok(n)) => n,
+            _ => 0,
+        }
+    };
 
     // Windows: WebView2 Navigate
     #[cfg(target_os = "windows")]
@@ -61,7 +69,18 @@ pub async fn webview_navigate(
             .map_err(|e| format!("NAVIGATION_ERROR: {}", e))?;
     }
 
-    // Wait for page load
+    // Wait for page load. WebKit says when a load failed, so stop there: the
+    // window still shows the previous page, and nothing will replace it.
+    #[cfg(target_os = "macos")]
+    if let Some(failure) = wait_unless_failed(navigation, failures_before, wait_ms).await {
+        tracing::info!("Navigation failed: {}", failure);
+        return Ok(NavigateResult {
+            url: parsed_url.to_string(),
+            title: None,
+            failure: Some(failure),
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
     tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms)).await;
 
     // Windows: CDP re-setup after navigation
@@ -101,16 +120,56 @@ pub async fn webview_navigate(
     Ok(NavigateResult {
         url: current_url,
         title,
+        failure: None,
     })
 }
 
-/// macOS: WKWebView native navigation via loadRequest
+/// Sleep for `wait_ms`, unless WebKit reports that `navigation` failed first.
+/// Only a failure recorded after `failures_before` counts, so a later load
+/// whose `WKNavigation` got a freed address cannot match an old failure.
+/// Without a navigation (the main thread did not answer in time), any failure
+/// after `failures_before` counts.
 #[cfg(target_os = "macos")]
-fn webview_navigate_macos(window: &tauri::WebviewWindow, url: &str) -> Result<(), String> {
+async fn wait_unless_failed(
+    navigation: usize,
+    failures_before: u64,
+    wait_ms: u64,
+) -> Option<serde_json::Value> {
+    use crate::main_frame;
+    use tokio::time::{sleep, Duration, Instant};
+
+    let failed = || {
+        if navigation != 0 {
+            main_frame::for_navigation(navigation, failures_before)
+        } else {
+            main_frame::newest_after(failures_before)
+        }
+    };
+    let deadline = Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        if let Some(f) = failed() {
+            return Some(main_frame::settled(f).await.to_json());
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        sleep((deadline - now).min(Duration::from_millis(100))).await;
+    }
+}
+
+/// macOS: WKWebView native navigation via loadRequest. The receiver gets the
+/// `WKNavigation` pointer, or nothing when WebKit refused to start the load.
+#[cfg(target_os = "macos")]
+fn webview_navigate_macos(
+    window: &tauri::WebviewWindow,
+    url: &str,
+) -> Result<tokio::sync::oneshot::Receiver<usize>, String> {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
 
     let url_owned = url.to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel();
 
     window
         .with_webview(move |wv| unsafe {
@@ -145,11 +204,15 @@ fn webview_navigate_macos(window: &tauri::WebviewWindow, url: &str) -> Result<()
                 requestWithURL: nsurl
             ];
 
-            let _: *mut AnyObject = msg_send![webview_ptr, loadRequest: request];
+            let navigation: *mut AnyObject = msg_send![webview_ptr, loadRequest: request];
+            if !navigation.is_null() {
+                let _ = tx.send(navigation as usize);
+            }
 
             tracing::info!("[macOS] Native navigation to: {}", url_owned);
         })
-        .map_err(|e| format!("with_webview error: {:?}", e))
+        .map_err(|e| format!("with_webview error: {:?}", e))?;
+    Ok(rx)
 }
 
 /// Windows: WebView2 native navigation via Navigate()
