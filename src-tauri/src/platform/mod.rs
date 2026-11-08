@@ -4,6 +4,12 @@ pub mod js_exec;
 pub mod mouse;
 pub mod navigation;
 pub mod security;
+/// macOS: the WKWebView cookie jar for `cookies`.
+#[cfg(target_os = "macos")]
+pub mod wk_cookies;
+/// macOS: failed loads and `--trust-cert` challenges from the navigation delegate.
+#[cfg(target_os = "macos")]
+pub mod wk_delegate;
 
 pub use js_exec::*;
 pub use mouse::*;

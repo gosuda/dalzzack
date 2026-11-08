@@ -59,6 +59,9 @@ pub struct DaemonOptions {
     pub console_buffer: Option<usize>,
     /// Stop by itself after this many seconds (`--ttl`).
     pub ttl_secs: Option<u64>,
+    /// `--trust-cert`: absolute paths of PEM files whose certificates this
+    /// WKWebView instance trusts on top of the system roots (macOS only).
+    pub trust_certs: Vec<String>,
 }
 
 /// `start --ttl`: `(seconds, epoch ms it expires at)`, set once at startup.
@@ -338,6 +341,7 @@ pub fn start_daemon(
         chrome_path,
         console_buffer,
         ttl_secs,
+        trust_certs,
     } = opts;
     let port_file = port_file_path(instance_id);
     let pid_file = pid_file_path(instance_id);
@@ -458,6 +462,13 @@ pub fn start_daemon(
                     }
                 }
 
+                if !trust_certs.is_empty()
+                    && crate::trust_cert::hashes_of(&trust_certs)
+                        != crate::trust_cert::reported_hashes(&info)
+                {
+                    ignored.push("--trust-cert");
+                }
+
                 let hint = if ignored.is_empty() {
                     None
                 } else {
@@ -487,6 +498,7 @@ pub fn start_daemon(
                     "user_agent_source": info.get("user_agent_source"),
                     "engine": live_engine,
                     "profile": info.get("profile"),
+                    "trusted_certs": info.get("trusted_certs"),
                     "ignored_flags": ignored,
                     "hint": hint,
                 }));
@@ -572,6 +584,10 @@ pub fn start_daemon(
     if let Some(s) = ttl_secs {
         args.push("--ttl-secs".to_string());
         args.push(s.to_string());
+    }
+    for path in &trust_certs {
+        args.push("--trust-cert".to_string());
+        args.push(path.clone());
     }
 
     // Windows: CreateProcessW(bInheritHandles=TRUE) duplicates EVERY inheritable
@@ -713,6 +729,7 @@ pub fn start_daemon(
         "ttl_s": field("ttl_s"),
         "expires_at_ms": field("expires_at_ms"),
         "console_buffer": field("console_buffer"),
+        "trusted_certs": field("trusted_certs"),
         "hint": hint,
     }))
 }
@@ -764,6 +781,7 @@ pub fn run_daemon(instance_id: String, opts: DaemonOptions) {
         chrome_path: _,
         console_buffer: _,
         ttl_secs: _,
+        trust_certs,
     } = opts;
 
     // Must be set before `setup_cdp` runs — it decides Page.setBypassCSP.
@@ -772,6 +790,27 @@ pub fn run_daemon(instance_id: String, opts: DaemonOptions) {
     // Setup logging and panic hook
     crate::setup_panic_hook();
     let _log_guard = crate::init_file_logging(Some(&instance_id));
+
+    // `start` checked these files already. One that changed since then stops
+    // the daemon with the reason, which `start` prints.
+    let mut anchors = Vec::new();
+    for path in &trust_certs {
+        match crate::trust_cert::read(std::path::Path::new(path)) {
+            Ok(mut found) => anchors.append(&mut found),
+            Err(message) => {
+                tracing::error!("[trust-cert] {message}");
+                let _ = std::fs::write(startup_error_path(&instance_id), &message);
+                std::process::exit(1);
+            }
+        }
+    }
+    crate::trust_cert::set_anchors(anchors);
+    #[cfg(target_os = "macos")]
+    if let Err(message) = crate::platform::wk_delegate::load_anchors() {
+        tracing::error!("[trust-cert] {message}");
+        let _ = std::fs::write(startup_error_path(&instance_id), &message);
+        std::process::exit(1);
+    }
 
     // Whose cookie jar this is. WebView2 permits one set of browser arguments
     // per user data folder, so `--browser-arg` has always implied a folder of
@@ -1232,6 +1271,12 @@ async fn handle_connection(
                 // it is the difference between "no violations" and "no
                 // enforcement".
                 "csp_bypassed": crate::state::csp_bypassed(),
+                // `start --trust-cert`: what this WKWebView trusts on top of
+                // the system roots, so a test report can name it.
+                "trusted_certs": crate::trust_cert::report(),
+                // What sees a main-frame load that failed: the CDP network
+                // stream, the WKWebView delegate, or nothing.
+                "load_failure_capture": crate::main_frame::capture_word(),
             }),
         };
         let resp_str = serde_json::to_string(&resp)?;

@@ -146,17 +146,12 @@ async fn navigate(args: &Value) -> Result<Value> {
         .and_then(|e| e.as_str())
         .filter(|s| !s.is_empty())
     {
-        let mut out = json!({
-            "status": "failed",
-            "error": "NAVIGATION_FAILED",
-            "message": err,
-            "url": url,
-        });
-        merge(
-            &mut out,
-            crate::tools::network::navigation_report(seq_before, Some(url)),
-        );
-        return Ok(out);
+        crate::main_frame::consume();
+        return Ok(crate::tools::definitions::failed_navigation(
+            url,
+            &json!({ "failing_url": url, "error_text": err, "message": err }),
+            &crate::tools::network::navigation_report(seq_before, Some(url)),
+        ));
     }
     // No loader id = a same-document navigation (fragment / history): nothing
     // will "load".
@@ -208,6 +203,8 @@ async fn navigate(args: &Value) -> Result<Value> {
         &mut out,
         crate::tools::network::navigation_report(seq_before, Some(url)),
     );
+    // Whatever failed during this call is this call's to report.
+    crate::main_frame::consume();
     Ok(out)
 }
 

@@ -437,6 +437,32 @@ const WRY_DEFAULT_BROWSER_ARGS: &str =
 // asked for `--private-profile` — get their own
 // (`crate::profile::private_webview_dir`, chosen by `run_daemon`).
 
+/// macOS: show the dalzzack icon in the Dock and the app switcher.
+///
+/// The icon of a macOS app comes from its `.app` bundle, and the release is a
+/// bare binary (`tauri build --no-bundle`). Tauri sets the Dock icon itself only
+/// in dev builds, so a release showed the generic executable icon. Must run on
+/// the main thread, as the `setup` hook does.
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    const ICON: &[u8] = include_bytes!("../icons/icon.icns");
+    unsafe {
+        let data = objc2_foundation::NSData::with_bytes(ICON);
+        let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
+        let image: *mut AnyObject = msg_send![image, initWithData: &*data];
+        if image.is_null() {
+            tracing::warn!("[macOS] the embedded icon.icns is not an image; Dock icon unchanged");
+            return;
+        }
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, setApplicationIconImage: image];
+    }
+    tracing::info!("[macOS] Dock icon set from the embedded icon.icns");
+}
+
 /// Run with an instance ID for parallel execution support.
 pub fn run_with_instance_id(opts: AppOptions) {
     let AppOptions {
@@ -581,6 +607,9 @@ pub fn run_with_instance_id(opts: AppOptions) {
             // Daemon-spawned processes (esp. on macOS) don't always auto-activate.
             let _ = window.show();
             let _ = window.set_focus();
+
+            #[cfg(target_os = "macos")]
+            set_dock_icon();
 
             tracing::info!("Main window created successfully");
 

@@ -4,6 +4,50 @@ All notable changes to dalzzack. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [SemVer](https://semver.org).
 
+## [1.2.0] - 2026-11-08
+
+### Added
+
+- `start --trust-cert <PEM>` (macOS WKWebView): trust the certificates in a PEM
+  file for one instance, on top of the system roots. Apple's other checks stay:
+  the 825-day limit, the host name, and the key usage. Nothing goes into the
+  keychain, and the anchors are gone at `stop`. `start` and `list` report
+  `trusted_certs`. Refused on Windows and with `--engine chrome`.
+- `cookies list|clear` on macOS WKWebView, from `WKHTTPCookieStore`, with the
+  same fields as on CDP: `http_only`, `secure`, `same_site`, `host_only`,
+  `expires`.
+- `failed-requests` on macOS WKWebView lists the main-frame loads that failed
+  (`coverage: "main_frame_only"`).
+- `scripts/verify-webkit.sh` checks certificates and cookies on a Mac.
+  `scripts/fixtures/tls-fixture.mjs` serves HTTPS with a test CA for it.
+
+### Changed
+
+- Windows checks certificates. Since 1.0.0, WebView2 accepted every
+  certificate (CDP `Security.setIgnoreCertificateErrors`), so a site with a bad
+  certificate loaded with HTTP 200. To accept any certificate for one instance,
+  start it with `--browser-arg=--ignore-certificate-errors`; such an instance
+  gets its own WebView2 user data folder. This also applies behind a proxy that
+  inspects TLS with a CA that Windows does not trust.
+- On WebView2, an HTTP error with an empty body (WebView2 then shows its own
+  error page, `net::ERR_HTTP_RESPONSE_CODE_FAILURE`) is now a failed
+  `navigate`, as on the Chrome engine.
+
+### Fixed
+
+- `navigate` returned `status: completed` when the main-frame load failed: a
+  refused certificate, a name that does not resolve, a refused connection. It
+  now returns `status: failed`, `error: NAVIGATION_FAILED`, and the reason:
+  `error_text` on WebView2 and Chrome (`net::ERR_CERT_AUTHORITY_INVALID`), and
+  `error_domain`, `error_code`, and `trust_error` on WKWebView
+  (`NSURLErrorDomain -1202`). On WKWebView it then returns at once.
+- `wait-navigation` reports such a load as `failed` at once, not as a timeout
+  after 30 seconds.
+- The macOS Dock shows the dalzzack icon. The release is a bare binary, and
+  Tauri sets the Dock icon only in dev builds.
+- `start --help` said `--browser-arg` is Windows-only. It also applies to
+  `--engine chrome`.
+
 ## [1.1.0] - 2026-11-06
 
 ### Added

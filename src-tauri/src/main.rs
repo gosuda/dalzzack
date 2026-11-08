@@ -87,12 +87,12 @@ enum Cli {
         /// Directory to write auto-dumps to when --watch-hang fires (default: <temp>/dalzzack-hangs).
         #[arg(long = "auto-dump-dir")]
         auto_dump_dir: Option<String>,
-        /// Extra Chromium flag for the WebView2 browser process. Repeatable, e.g.
-        /// `--browser-arg "--enable-heap-profiling" --browser-arg "--js-flags=--stack-trace-limit=0"`.
-        /// Only applied at daemon start (WebView2 reads these at environment creation).
-        /// Such an instance gets its OWN user data folder — WebView2 allows one set of browser
-        /// arguments per folder — so it does not share cookies/logins with other ids.
-        /// Windows-only; ignored elsewhere.
+        /// Extra Chromium flag, for WebView2 on Windows and for `--engine chrome` on any
+        /// platform. Repeatable, e.g. `--browser-arg "--enable-heap-profiling"`, or
+        /// `--browser-arg=--ignore-certificate-errors` to accept any certificate. Only applied
+        /// at daemon start. A WebView2 instance with it gets its OWN user data folder —
+        /// WebView2 allows one set of browser arguments per folder — so it does not share
+        /// cookies/logins with other ids. WKWebView (macOS) has no such flags and ignores it.
         // allow_hyphen_values: every useful value here starts with `--`, which clap
         // would otherwise parse as the next flag.
         #[arg(long = "browser-arg", allow_hyphen_values = true)]
@@ -165,6 +165,13 @@ enum Cli {
         /// first; `console-logs` reports `dropped` and `buffer_size`.
         #[arg(long = "console-buffer")]
         console_buffer: Option<usize>,
+        /// macOS WKWebView only: trust the certificates in this PEM file for this instance, on
+        /// top of the system roots. Every other check Safari applies stays: the 825-day limit,
+        /// the host name, the key usage. Nothing goes into the keychain, and the anchors are
+        /// gone at `stop`. Repeatable. Refused on Windows and with `--engine chrome`.
+        /// `start` and `list` report `trusted_certs`.
+        #[arg(long = "trust-cert")]
+        trust_cert: Vec<String>,
     },
 
     /// Resize the window of an ALREADY-RUNNING daemon (use this for responsive testing or mid-session resize).
@@ -1361,6 +1368,8 @@ enum Cli {
         console_buffer: Option<usize>,
         #[arg(long = "ttl-secs")]
         ttl_secs: Option<u64>,
+        #[arg(long = "trust-cert")]
+        trust_cert: Vec<String>,
     },
 }
 
@@ -1615,9 +1624,19 @@ fn main() {
             chrome_path,
             ttl,
             console_buffer,
+            trust_cert,
         } => {
             let engine_given = engine.is_some();
             let engine = parse_engine_or_exit(engine.as_deref().unwrap_or("webview"));
+            let trust_certs = dalzzack_lib::trust_cert::check_start(
+                &trust_cert,
+                engine,
+                cfg!(target_os = "macos"),
+            )
+            .unwrap_or_else(|failure| {
+                println!("{failure}");
+                std::process::exit(2);
+            });
             let ttl_secs = match ttl.as_deref().map(dalzzack_lib::daemon::parse_ttl) {
                 Some(Err(message)) => {
                     println!(
@@ -1651,6 +1670,7 @@ fn main() {
                         chrome_path,
                         console_buffer,
                         ttl_secs,
+                        trust_certs,
                     },
                 ),
                 &filter,
@@ -1690,6 +1710,7 @@ fn main() {
             chrome_path,
             console_buffer,
             ttl_secs,
+            trust_cert,
         } => {
             // Internal: run as daemon process (Tauri app + socket server).
             // The empty-id default exists for tool commands; a daemon must
@@ -1719,6 +1740,7 @@ fn main() {
                     chrome_path,
                     console_buffer,
                     ttl_secs,
+                    trust_certs: trust_cert,
                 },
             );
         }

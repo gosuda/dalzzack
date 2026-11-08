@@ -271,7 +271,7 @@ A future release will be published to crates.io so `cargo install dalzzack` work
 ### CI / release
 
 GitHub Actions workflows:
-- **CI** (`ci.yml`): format check, Clippy (macOS), unit tests and build (macOS, Windows), smoke test (macOS)
+- **CI** (`ci.yml`): format check, Clippy (macOS), unit tests and build (macOS, Windows), smoke test and the WKWebView certificate and cookie checks (macOS)
 - **Release** (`release.yml`): on `v*` tags, checks the tag against the version files, creates a draft, and publishes it after all builds pass. It builds the binary with `tauri build --no-bundle` and attaches `dalzzack-macos-universal.tar.gz` and `dalzzack-windows-x64.zip`, each with a `.sha256` file, to the GitHub release. It publishes no installers: they did not put `dalzzack` on `PATH`. A tag with a hyphen, such as `v1.0.0-rc.1`, makes a pre-release, which the `releases/latest` links skip.
 
 ---

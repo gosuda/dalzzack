@@ -17,6 +17,8 @@ All commands except `start`, `stop`, `list`, `run`, `guide`, `install`, `tools`,
 | `start … --engine chrome [--chrome-path PATH]` | Drive a real Google Chrome on a throw-away profile instead of WebView2. See [Chrome engine](#chrome-engine). |
 | `start … --ttl 10m` | Stop by itself after `90s` / `10m` / `2h` / `1h30m` (bare = seconds), through the same path as `stop`, so Chrome and a private-profile folder go with it. For short-lived comparison instances. |
 | `start … --console-buffer N` | Console ring size (default 500, max 100000). |
+| `start … --browser-arg FLAG` | A Chromium flag for WebView2 (Windows) and for `--engine chrome`. WKWebView ignores it. A WebView2 instance with it gets its own user data folder. `--browser-arg=--ignore-certificate-errors` accepts any certificate; certificates are checked otherwise. |
+| `start … --trust-cert PEM` | **macOS WKWebView only.** Trust the certificates in a PEM file for this instance, on top of the system roots, with every other Safari check kept (825-day limit, host name, key usage). Nothing goes into the keychain. `start` and `list` report `trusted_certs`. Refused on Windows and with `--engine chrome`. |
 | `resize --id <ID> --width PX --height PX` | Change window size of a running daemon |
 | `stop --id <ID>` | Graceful stop (sends `__shutdown` over TCP). |
 | `kill --id <ID>` | Force-kill by PID, the escape hatch when `stop` times out on a wedged daemon. It kills only the process that wrote the pid file: the pid file also holds that process's identity, so a pid that now belongs to another program is left alone. A pid file from before 1.1 has no identity, so `kill` refuses it with `unverified_pid`. On a Chrome-engine id it also ends Chrome and deletes its profile. |
@@ -35,7 +37,7 @@ All commands except `start`, `stop`, `list`, `run`, `guide`, `install`, `tools`,
 
 | Command | Description |
 |---------|-------------|
-| `navigate --url <URL> [--timeout-ms 5000]` | Navigate to URL. Returns the `title` and the main document's outcome: `document` with its status and every redirect hop, a detected `challenge` (e.g. `cloudflare:challenge`), and `later_navigations`. A challenge that solves itself is not reported as a plain success |
+| `navigate --url <URL> [--timeout-ms 5000]` | Navigate to URL. Returns the `title` and the main document's outcome: `document` with its status and every redirect hop, a detected `challenge` (e.g. `cloudflare:challenge`), and `later_navigations`. A challenge that solves itself is not reported as a plain success. A main-frame load that failed (certificate, DNS, connection) is `status: failed`, `error: NAVIGATION_FAILED`, with `error_text` (WebView2, Chrome) or `error_domain`, `error_code`, and `trust_error` (WKWebView). |
 | `back` / `forward` | Walk browser history (`history.back/forward()`). Polls for up to 3 s; returns `before_url`, `after_url`, `elapsed_ms`, and a `changed` flag |
 | `reload [--hard]` | Reload the current page. `--hard` bypasses the HTTP cache, the Ctrl+Shift+R equivalent (Windows: CDP `Page.reload {ignoreCache:true}`; macOS: `-[WKWebView reloadFromOrigin]`) |
 | `clear-site-data [--origin URL] [--types LIST]` | Wipe an origin's storage out-of-band: service worker registrations, CacheStorage, localStorage, IndexedDB, cookies. Bypasses the page's JS world, so it still works when a proxy/membrane or a policy hides `navigator.serviceWorker`. `--origin` defaults to the current page. Types: `appcache,cache_storage,cookies,file_systems,indexeddb,local_storage,service_workers,shader_cache,websql`, or `all`. **macOS clears by HOST, not origin**: `WKWebsiteDataRecord` doesn't distinguish scheme or port, and the response says so (`scope: "host"`) |
@@ -69,8 +71,8 @@ All commands except `start`, `stop`, `list`, `run`, `guide`, `install`, `tools`,
 | `wait-for --selector CSS [--state present\|added\|removed] [--text "..."] [--timeout-ms 10000]` | Event-driven wait |
 | `wait --ms MS` | Sleep |
 | `nav-log [--frames] [--headers] [--max 20]` | Navigation timeline: every document request chain, each redirect hop with its status, `location`, `cf-mitigated`, set-cookie names and whether it committed. `--headers` adds the request headers as sent on the wire (cookies masked, `sec-fetch-*`). Always on, no `--record`. |
-| `failed-requests [--resource-type T] [--no-http-errors] [--include-canceled]` | Every failed request of any resource type, with its URL: `blocked` / `cors` / `network_error` / `http_error` / `canceled`. Always on. |
-| `cookies [list\|clear] [--url U \| --domain D \| --all] [--name N]` | The cookie jar via CDP, HttpOnly and parent-domain cookies included. `clear` re-reads the jar and reports what `remaining`. |
+| `failed-requests [--resource-type T] [--no-http-errors] [--include-canceled]` | Every failed request of any resource type, with its URL: `blocked` / `cors` / `network_error` / `http_error` / `canceled`. Always on. On macOS WKWebView, only main-frame loads that failed (`coverage: "main_frame_only"`). |
+| `cookies [list\|clear] [--url U \| --domain D \| --all] [--name N]` | The cookie jar via CDP, or `WKHTTPCookieStore` on macOS WKWebView, HttpOnly and parent-domain cookies included, with the same fields on every engine. `clear` re-reads the jar and reports what `remaining`. |
 
 ### `describe` output
 

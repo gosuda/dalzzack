@@ -27,6 +27,8 @@ pub mod inject;
 pub mod injection;
 pub mod intercept;
 pub mod logging;
+/// Main-frame loads that failed, on every engine (`navigate`, `wait-navigation`).
+pub mod main_frame;
 /// Always-on request index and navigation timeline (`nav-log`,
 /// `failed-requests`, `list`'s current URL).
 pub mod netlog;
@@ -45,6 +47,8 @@ pub mod site_data;
 pub mod state;
 pub mod sw_console;
 pub mod tools;
+/// `start --trust-cert`: extra trust anchors for one WKWebView instance.
+pub mod trust_cert;
 pub mod types;
 /// User-Agent resolution and engine-version detection.
 pub mod ua;

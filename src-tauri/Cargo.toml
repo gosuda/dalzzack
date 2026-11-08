@@ -1,6 +1,6 @@
 [package]
 name = "dalzzack"
-version = "1.1.0"
+version = "1.2.0"
 description = "Browser automation CLI for AI agents — screenshot-first, token-efficient."
 authors = ["dalzzack contributors"]
 edition = "2021"
@@ -93,6 +93,10 @@ objc2-foundation = "0.3"
 objc2-web-kit = "0.3"
 block2 = "0.6"
 core-graphics = "0.24"
+# `start --trust-cert` and the certificate reason of a failed load. Both are
+# already in Cargo.lock through rustls-platform-verifier.
+security-framework = "3"
+core-foundation = "0.10"
 
 [features]
 # DevTools on by default: this is a debugging/automation tool, so F12 and
