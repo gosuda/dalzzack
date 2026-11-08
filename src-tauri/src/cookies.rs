@@ -7,7 +7,8 @@
 //! session cookies shared across subdomains) and every third-party ad cookie
 //! exactly where they were, with nothing to check that against. This reads and
 //! deletes through CDP's `Network` domain instead, which sees the jar as the
-//! network stack does.
+//! network stack does. WKWebView has no CDP: there the jar is its
+//! `WKHTTPCookieStore` (`platform::wk_cookies`), in the same shape.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -92,8 +93,59 @@ async fn resolve_scope(args: &Value) -> Result<Scope, Value> {
     }
 }
 
+/// Would a browser send this cookie (a CDP `Network.Cookie`) to `url`?
+/// RFC 6265 section 5.4: the domain, the path, and `Secure`.
+pub(crate) fn would_send(cookie: &Value, url: &url::Url) -> bool {
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    let domain = cookie["domain"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let domain_ok = match domain.strip_prefix('.') {
+        Some(parent) => host == parent || host.ends_with(&format!(".{parent}")),
+        None => host == domain,
+    };
+    let path = cookie["path"].as_str().unwrap_or("/");
+    let request = url.path();
+    let path_ok = path.is_empty()
+        || request == path
+        || (request.starts_with(path)
+            && (path.ends_with('/') || request[path.len()..].starts_with('/')));
+    let secure_ok = cookie["secure"] != true || matches!(url.scheme(), "https" | "wss");
+    domain_ok && path_ok && secure_ok
+}
+
+/// Does this daemon read its cookies from the WKWebView store?
+fn webkit_jar() -> bool {
+    cfg!(target_os = "macos") && !crate::engine::is_chrome()
+}
+
+/// The WebKit jar, in scope.
+async fn fetch_webkit(scope: &Scope) -> Result<Vec<Value>, String> {
+    #[cfg(target_os = "macos")]
+    let list = crate::platform::wk_cookies::all().await?;
+    #[cfg(not(target_os = "macos"))]
+    let list: Vec<Value> = Vec::new();
+    Ok(match scope {
+        Scope::Url(u) => {
+            let url = url::Url::parse(u).map_err(|e| format!("invalid --url '{u}': {e}"))?;
+            list.into_iter().filter(|c| would_send(c, &url)).collect()
+        }
+        Scope::Domain(d) => list
+            .into_iter()
+            .filter(|c| c["domain"].as_str().is_some_and(|cd| domain_related(cd, d)))
+            .collect(),
+        Scope::All => list,
+    })
+}
+
 /// Fetch the cookies in scope, as CDP `Network.Cookie` objects.
 async fn fetch(scope: &Scope) -> Result<Vec<Value>, String> {
+    if !crate::engine::has_cdp() {
+        return fetch_webkit(scope).await;
+    }
     let raw = match scope {
         Scope::Url(u) => {
             crate::engine::page_cdp("Network.getCookies", &json!({ "urls": [u] }), TIMEOUT).await?
@@ -210,7 +262,8 @@ fn unsupported(msg: &str) -> Value {
         "status": "failed",
         "error": "UNSUPPORTED_PLATFORM",
         "message": msg,
-        "hint": "Cookies are read through CDP: WebView2 on Windows, or `start --engine chrome`.",
+        "hint": "Cookies are read through CDP (WebView2 on Windows, or `start --engine chrome`), \
+                 or from the WKWebView cookie store on macOS.",
     })
 }
 
@@ -218,14 +271,20 @@ fn cdp_failure(e: String) -> Value {
     if e.starts_with("UNSUPPORTED_PLATFORM") {
         return unsupported(&e);
     }
-    json!({ "status": "failed", "error": "CDP_ERROR", "message": e })
+    let error = if crate::engine::has_cdp() {
+        "CDP_ERROR"
+    } else {
+        "COOKIE_STORE_ERROR"
+    };
+    json!({ "status": "failed", "error": error, "message": e })
 }
 
 /// `cookies` tool: `action` = `list` (default) | `clear`.
 pub async fn tool_cookies(args: &Value) -> Result<Value> {
-    if !crate::engine::has_cdp() {
+    if !crate::engine::has_cdp() && !webkit_jar() {
         return Ok(unsupported(
-            "`cookies` needs CDP's Network domain, which this engine does not have",
+            "`cookies` needs CDP's Network domain or the WKWebView cookie store, and this \
+             engine has neither",
         ));
     }
     let action = args
@@ -313,7 +372,13 @@ async fn clear(scope: Scope, name: Option<&str>, args: &Value) -> Result<Value> 
 
     let mut deleted: Vec<Value> = Vec::new();
     let mut errors: Vec<Value> = Vec::new();
-    if scope == Scope::All && name.is_none() {
+    if !crate::engine::has_cdp() {
+        #[cfg(target_os = "macos")]
+        match crate::platform::wk_cookies::delete(&targets).await {
+            Ok((d, e)) => (deleted, errors) = (d, e),
+            Err(e) => return Ok(cdp_failure(e)),
+        }
+    } else if scope == Scope::All && name.is_none() {
         if let Err(e) =
             crate::engine::page_cdp("Network.clearBrowserCookies", &json!({}), TIMEOUT).await
         {
@@ -388,6 +453,23 @@ mod tests {
         assert!(!domain_related("badexample.com", "example.com"));
         assert!(!domain_related(".example.com", "example.org"));
         assert!(!domain_related("", "example.com"));
+    }
+
+    #[test]
+    fn a_cookie_is_sent_where_rfc_6265_sends_it() {
+        let url = |u: &str| url::Url::parse(u).unwrap();
+        let host_only = json!({ "domain": "app.test", "path": "/", "secure": true });
+        assert!(would_send(&host_only, &url("https://app.test/login")));
+        // Host-only: never to a subdomain, and Secure: never over http.
+        assert!(!would_send(&host_only, &url("https://a.app.test/")));
+        assert!(!would_send(&host_only, &url("http://app.test/")));
+
+        let parent = json!({ "domain": ".app.test", "path": "/api" });
+        assert!(would_send(&parent, &url("http://app.test/api")));
+        assert!(would_send(&parent, &url("http://x.app.test/api/v1")));
+        // A path is a prefix only up to a `/`.
+        assert!(!would_send(&parent, &url("http://app.test/apiv2")));
+        assert!(!would_send(&parent, &url("http://otherapp.test/api")));
     }
 
     #[test]
