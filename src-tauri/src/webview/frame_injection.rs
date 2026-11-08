@@ -636,25 +636,18 @@ pub async fn setup_cdp_for_webview(
         tracing::warn!("[CDP] Page.setBypassCSP failed to set enabled={bypass}");
     }
 
-    // 2. Security.setIgnoreCertificateErrors — ignore certificate errors
-    let cert_ok = call_cdp_method(
-        webview,
-        "Security.setIgnoreCertificateErrors",
-        r#"{"ignore": true}"#,
-    )
-    .await?;
-    if cert_ok {
-        tracing::debug!("[CDP] Security.setIgnoreCertificateErrors enabled");
-    } else {
-        tracing::debug!("[CDP] Security.setIgnoreCertificateErrors failed (ignored)");
-    }
+    // Certificates are checked, as in a real browser. This used to call
+    // `Security.setIgnoreCertificateErrors`, so a refused certificate loaded
+    // with HTTP 200 and a test said "loads" for a site no browser would show.
+    // One instance that must accept any certificate takes
+    // `--browser-arg=--ignore-certificate-errors`.
 
-    // 3. Subscribe to events first (Runtime.enable re-emits existing contexts, so order matters)
+    // 2. Subscribe to events first (Runtime.enable re-emits existing contexts, so order matters)
     subscribe_execution_context_events(webview, context_store.clone()).await?;
     subscribe_execution_context_lifecycle(webview, context_store).await?;
     tracing::debug!("[CDP] ExecutionContext event subscriptions set up");
 
-    // 4. Enable the Runtime domain → existing contexts get re-emitted as executionContextCreated
+    // 3. Enable the Runtime domain → existing contexts get re-emitted as executionContextCreated
     let enabled = enable_runtime_domain(webview).await?;
     if enabled {
         tracing::debug!("[CDP] Runtime domain enabled (existing contexts re-emitted)");
