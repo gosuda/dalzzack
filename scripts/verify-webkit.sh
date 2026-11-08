@@ -12,7 +12,8 @@
 # Environment:
 #   DALZZACK=<path>     the binary to test (default: `dalzzack` on PATH)
 #   LOCAL_ONLY=1        skip the public badssl.com sites
-#   PORTAL_CERT=<file>  also run the Portal checks with this fullchain.pem
+#   PORTAL_CERT=<file>  also run the Portal checks with this fullchain.pem. An app
+#                       named `app` must be connected to the relay.
 #   PORTAL_HOST=<host>  the Portal relay host (default: portal.localhost:4643)
 #
 # It prints PASS or FAIL for each check, then `ALL PASSED` or the number of
@@ -168,9 +169,11 @@ if [ -n "${PORTAL_CERT:-}" ]; then
     start --id "$ID-portal" --ttl 15m --trust-cert "$PORTAL_CERT"
   expect "https://$HOST/api/healthz loads" "$LOADED" navigate -i "$ID-portal" --url "https://$HOST/api/healthz"
   expect "https://app.$HOST/ loads" "$LOADED" navigate -i "$ID-portal" --url "https://app.$HOST/"
-  expect "https://app.localhost:$PORT/ is refused (host name)" "$REFUSED" \
+  # The relay serves only its own host and the apps connected to it. For any
+  # other name it closes the connection before it sends a certificate, so the
+  # load fails with -1200 and there is no trust_error to check.
+  expect "https://app.localhost:$PORT/ does not load (the relay serves no such host)" "$FAILED" \
     navigate -i "$ID-portal" --url "https://app.localhost:$PORT/"
-  trust_note
   expect "example.com loads with the flag" "$LOADED" navigate -i "$ID-portal" --url https://example.com/
 fi
 
