@@ -47,6 +47,8 @@ pub mod site_data;
 pub mod state;
 pub mod sw_console;
 pub mod tools;
+/// `start --trust-cert`: extra trust anchors for one WKWebView instance.
+pub mod trust_cert;
 pub mod types;
 /// User-Agent resolution and engine-version detection.
 pub mod ua;

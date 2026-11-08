@@ -1877,7 +1877,7 @@ pub async fn setup_cdp_for_webview(
 
     macos_native::setup_native_frame_handler(webview)?;
 
-    // Before the first navigation: failed loads.
+    // Before the first navigation: failed loads, and `--trust-cert`.
     if let Err(e) = crate::platform::wk_delegate::install(webview) {
         tracing::error!("[wk-delegate] {e}");
     }

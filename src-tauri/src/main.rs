@@ -165,6 +165,13 @@ enum Cli {
         /// first; `console-logs` reports `dropped` and `buffer_size`.
         #[arg(long = "console-buffer")]
         console_buffer: Option<usize>,
+        /// macOS WKWebView only: trust the certificates in this PEM file for this instance, on
+        /// top of the system roots. Every other check Safari applies stays: the 825-day limit,
+        /// the host name, the key usage. Nothing goes into the keychain, and the anchors are
+        /// gone at `stop`. Repeatable. Refused on Windows and with `--engine chrome`.
+        /// `start` and `list` report `trusted_certs`.
+        #[arg(long = "trust-cert")]
+        trust_cert: Vec<String>,
     },
 
     /// Resize the window of an ALREADY-RUNNING daemon (use this for responsive testing or mid-session resize).
@@ -1361,6 +1368,8 @@ enum Cli {
         console_buffer: Option<usize>,
         #[arg(long = "ttl-secs")]
         ttl_secs: Option<u64>,
+        #[arg(long = "trust-cert")]
+        trust_cert: Vec<String>,
     },
 }
 
@@ -1615,9 +1624,19 @@ fn main() {
             chrome_path,
             ttl,
             console_buffer,
+            trust_cert,
         } => {
             let engine_given = engine.is_some();
             let engine = parse_engine_or_exit(engine.as_deref().unwrap_or("webview"));
+            let trust_certs = dalzzack_lib::trust_cert::check_start(
+                &trust_cert,
+                engine,
+                cfg!(target_os = "macos"),
+            )
+            .unwrap_or_else(|failure| {
+                println!("{failure}");
+                std::process::exit(2);
+            });
             let ttl_secs = match ttl.as_deref().map(dalzzack_lib::daemon::parse_ttl) {
                 Some(Err(message)) => {
                     println!(
@@ -1651,6 +1670,7 @@ fn main() {
                         chrome_path,
                         console_buffer,
                         ttl_secs,
+                        trust_certs,
                     },
                 ),
                 &filter,
@@ -1690,6 +1710,7 @@ fn main() {
             chrome_path,
             console_buffer,
             ttl_secs,
+            trust_cert,
         } => {
             // Internal: run as daemon process (Tauri app + socket server).
             // The empty-id default exists for tool commands; a daemon must
@@ -1719,6 +1740,7 @@ fn main() {
                     chrome_path,
                     console_buffer,
                     ttl_secs,
+                    trust_certs: trust_cert,
                 },
             );
         }

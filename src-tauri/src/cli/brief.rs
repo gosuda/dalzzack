@@ -244,6 +244,12 @@ fn list(result: &Value) -> Value {
                 short.insert(key.to_string(), instance[key].clone());
             }
             short.insert("profile".into(), instance["profile"]["kind"].clone());
+            if instance["trusted_certs"]
+                .as_array()
+                .is_some_and(|certs| !certs.is_empty())
+            {
+                short.insert("trusted_certs".into(), instance["trusted_certs"].clone());
+            }
             if instance["recording"] != "never" {
                 short.insert("recording".into(), instance["recording"].clone());
             }
@@ -495,6 +501,21 @@ mod tests {
         let short = brief("list", &json!({}), &problem);
         assert_eq!(short["instances"][0]["recording"], "on");
         assert_eq!(short["instances"][0]["console_transport"], "unavailable");
+
+        // `start --trust-cert`: a test report must be able to name the anchors.
+        let mut trusting = full.clone();
+        trusting["instances"][0]["trusted_certs"] =
+            json!([{ "subject": "test CA", "sha256": "ab" }]);
+        let short = brief("list", &json!({}), &trusting);
+        assert_eq!(
+            short["instances"][0]["trusted_certs"][0]["subject"],
+            "test CA"
+        );
+        let mut none = full.clone();
+        none["instances"][0]["trusted_certs"] = json!([]);
+        assert!(brief("list", &json!({}), &none)["instances"][0]
+            .get("trusted_certs")
+            .is_none());
     }
 
     #[test]
