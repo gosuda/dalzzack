@@ -860,6 +860,71 @@ const tests = {
     }
   },
 
+  async "tls-failures"() {
+    // Windows checks certificates, and a load that failed says so (1.2.0).
+    // macOS runs the same questions in scripts/verify-webkit.sh.
+    if (platform() !== "win32") return;
+    const fixture = await startTlsFixture();
+    const id = `${INSTANCE_ID}-tls`;
+    const lax = `${INSTANCE_ID}-lax`;
+    // A data: URL, not a server in this process: run() blocks this process's
+    // event loop, so such a server could not answer the browser.
+    const linkPage =
+      "data:text/html," + encodeURIComponent(`<title>link</title><a id="go" href="${fixture.info.page}">go</a>`);
+    try {
+      run(`start --id ${id}`);
+      const bad = run(`navigate -i ${id} --url ${fixture.info.page}`).parsed;
+      assert(
+        bad?.status === "failed" && bad.error === "NAVIGATION_FAILED",
+        `a refused certificate must fail: ${JSON.stringify(bad)}`,
+      );
+      assert(/ERR_CERT/.test(bad.error_text || ""), `error_text names the certificate: ${bad.error_text}`);
+
+      const dns = run(`navigate -i ${id} --url https://no-such-host.invalid/`).parsed;
+      assert(
+        dns?.status === "failed" && /NAME_NOT_RESOLVED/.test(dns.error_text || ""),
+        `a name that does not resolve must fail: ${JSON.stringify(dns)}`,
+      );
+
+      const link = run(`navigate -i ${id} --url "${linkPage}"`).parsed;
+      assert(link?.status === "completed", `the link page loads: ${JSON.stringify(link)}`);
+      run(`click -i ${id} --selector "#go"`);
+      // An agent's wait can come seconds after its click.
+      await sleep(3000);
+      const started = Date.now();
+      const waited = run(`wait-navigation -i ${id} --timeout-ms 20000`, { timeout: 30000 }).parsed;
+      assert(
+        waited?.status === "failed" && waited.error === "NAVIGATION_FAILED",
+        `wait-navigation must report the refused page: ${JSON.stringify(waited)}`,
+      );
+      assert(Date.now() - started < 15000, "wait-navigation must not wait for its timeout");
+
+      const ok = run(`navigate -i ${id} --url https://example.com/`).parsed;
+      assert(ok?.status === "completed", `a good certificate still loads: ${JSON.stringify(ok)}`);
+
+      // One instance can accept any certificate, as on Chrome.
+      run(`start --id ${lax} --private-profile --browser-arg=--ignore-certificate-errors`);
+      const loaded = run(`navigate -i ${lax} --url ${fixture.info.page}`).parsed;
+      assert(
+        loaded?.status === "completed" && loaded.title === "dalzzack tls fixture",
+        `--ignore-certificate-errors must load it: ${JSON.stringify(loaded)}`,
+      );
+
+      // --trust-cert is for WKWebView on macOS only, and says so.
+      const refused = run(`start --id ${id}-trust --trust-cert "${fixture.info.ca}"`, {
+        expectFail: true,
+      });
+      assert(
+        !refused.ok && /UNSUPPORTED_PLATFORM/.test(refused.output),
+        `--trust-cert must be refused on Windows: ${refused.output}`,
+      );
+    } finally {
+      run(`stop --id ${id}`, { expectFail: true });
+      run(`stop --id ${lax}`, { expectFail: true });
+      fixture.stop();
+    }
+  },
+
   async "kill-real-daemon"() {
     run(`start --id ${INSTANCE_ID}`);
     await sleep(2000);
@@ -928,6 +993,33 @@ async function startHttpFixture() {
     await sleep(100);
   }
   return { base, stop: () => child.kill() };
+}
+
+/// Start scripts/fixtures/tls-fixture.mjs and read the JSON line it prints.
+async function startTlsFixture() {
+  const dir = mkdtempSync(join(tmpdir(), "dalzzack-tls-"));
+  const child = spawn(process.execPath, [join(__dirname, "fixtures", "tls-fixture.mjs"), dir], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  const info = await new Promise((done, fail) => {
+    const timer = setTimeout(() => fail(new Error("tls-fixture did not start in 30 s")), 30000);
+    let out = "";
+    child.stdout.on("data", (d) => {
+      out += d;
+      if (out.includes("\n")) {
+        clearTimeout(timer);
+        done(JSON.parse(out.split("\n")[0]));
+      }
+    });
+    child.on("exit", (code) => fail(new Error(`tls-fixture exited with ${code}`)));
+  });
+  return {
+    info,
+    stop: () => {
+      child.kill();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
 }
 
 async function main() {

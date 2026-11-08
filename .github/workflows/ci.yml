@@ -146,6 +146,13 @@ jobs:
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           bash scripts/smoke.sh
+      # A local HTTPS fixture with a test CA: failed loads, --trust-cert, and
+      # cookies on WKWebView. The public badssl.com sites stay out of CI.
+      - name: Check certificates and cookies on WebKit (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          LOCAL_ONLY=1 bash scripts/verify-webkit.sh
       # On a throw-away runner this measures the real folders under ~/Library.
       - name: Check that uninstall leaves nothing (macOS)
         if: runner.os == 'macOS'
