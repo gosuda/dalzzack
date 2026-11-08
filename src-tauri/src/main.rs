@@ -87,12 +87,12 @@ enum Cli {
         /// Directory to write auto-dumps to when --watch-hang fires (default: <temp>/dalzzack-hangs).
         #[arg(long = "auto-dump-dir")]
         auto_dump_dir: Option<String>,
-        /// Extra Chromium flag for the WebView2 browser process. Repeatable, e.g.
-        /// `--browser-arg "--enable-heap-profiling" --browser-arg "--js-flags=--stack-trace-limit=0"`.
-        /// Only applied at daemon start (WebView2 reads these at environment creation).
-        /// Such an instance gets its OWN user data folder — WebView2 allows one set of browser
-        /// arguments per folder — so it does not share cookies/logins with other ids.
-        /// Windows-only; ignored elsewhere.
+        /// Extra Chromium flag, for WebView2 on Windows and for `--engine chrome` on any
+        /// platform. Repeatable, e.g. `--browser-arg "--enable-heap-profiling"`, or
+        /// `--browser-arg=--ignore-certificate-errors` to accept any certificate. Only applied
+        /// at daemon start. A WebView2 instance with it gets its OWN user data folder —
+        /// WebView2 allows one set of browser arguments per folder — so it does not share
+        /// cookies/logins with other ids. WKWebView (macOS) has no such flags and ignores it.
         // allow_hyphen_values: every useful value here starts with `--`, which clap
         // would otherwise parse as the next flag.
         #[arg(long = "browser-arg", allow_hyphen_values = true)]
