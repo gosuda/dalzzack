@@ -5,6 +5,7 @@
 - `fill-form --fields '[{"selector":"#a","value":"1"}]'` — fill multiple fields (JSON)
 - `keyboard --text "hello"` | `keyboard --text "long" --paste` — type or paste text
 - `keyboard --key Enter [--modifiers ctrl,shift]` — press special keys
+- `keyboard --key Tab --native` — a native key press the page receives with `isTrusted: true` (the plain one is a JS event, `false`): an NSEvent on macOS, CDP `Input.dispatchKeyEvent` on Windows WebView2; not on Linux. Focus crosses into cross-origin iframes and closed shadow roots. No Accessibility permission; the mouse does not move. Named keys only, not `--text`. A Cloudflare Turnstile checkbox: `--key Tab --native`, then `--key Space --native`. The Chrome engine's keys are always trusted.
 - `scroll --to top|bottom [--selector CSS]` — absolute scroll
 - `scroll [--direction down] [--amount 500] [--selector CSS]` — relative scroll
 - `upload-file --selector "input[type=file]" --file PATH`
