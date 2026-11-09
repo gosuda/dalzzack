@@ -4,6 +4,22 @@ All notable changes to dalzzack. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [SemVer](https://semver.org).
 
+## [1.3.0] - 2026-11-09
+
+### Added
+
+- `keyboard --key <KEY> --native`: press a named key as a native key event.
+  macOS sends an `NSEvent` to the WebView's window; Windows sends CDP
+  `Input.dispatchKeyEvent` over WebView2. The page receives it with
+  `isTrusted: true`, and Tab moves focus into cross-origin iframes and closed
+  shadow roots, where the default JavaScript key events do not reach. Tab and
+  then Space this way tick a Cloudflare Turnstile checkbox. It needs no
+  Accessibility permission and does not move the mouse. The result reports
+  `method: "native"`, `transport` (`nsevent` or `cdp`), and on macOS the
+  window's `first_responder`. Linux refuses it.
+- The installed guide tells agents how to get past a Cloudflare "Verify you
+  are human" checkbox.
+
 ## [1.2.0] - 2026-11-08
 
 ### Added

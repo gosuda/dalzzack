@@ -187,7 +187,7 @@ dalzzack install codex-project   # ./AGENTS.md (current project)
 
 Use `codex-project` only when you want the guide in one repository.
 
-The guide is about 2.3 KB, because an agent pays for it in every session. It has the main commands and rules, and `dalzzack guide <topic>` prints the rest when an agent needs it.
+The guide is about 2.5 KB, because an agent pays for it in every session. It has the main commands and rules, and `dalzzack guide <topic>` prints the rest when an agent needs it.
 
 The guide sits between `<!-- dalzzack-begin -->` and `<!-- dalzzack-end -->`. `dalzzack upgrade` keeps that block up to date, and `dalzzack install --refresh` does the same by hand. For other agents, copy [AGENTS.md](AGENTS.md) into their instruction file.
 

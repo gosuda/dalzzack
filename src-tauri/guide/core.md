@@ -32,6 +32,7 @@ Rules:
 - Read a page with `get-text`. Use `get-html` only for a value that is not on the screen.
 - Run `describe` first on a new page. Open its screenshot only when the element list is not enough.
 - Prefer `click --text` or `--selector` to coordinates.
+- On the default engine, a Cloudflare "Verify you are human" checkbox takes neither `click` nor plain `keyboard`. Run `keyboard --key Tab --native`, then `keyboard --key Space --native`.
 - Use `wait-for` instead of a sleep, and `wait-navigation` after a click that replaces the document.
 - If a command times out, do not repeat it. Run `dalzzack pause -i b`, and read `dalzzack guide diagnostics`.
 - `start` flags apply only to a new daemon. Use `resize` to change a live window.

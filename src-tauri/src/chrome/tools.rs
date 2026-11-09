@@ -892,7 +892,7 @@ async fn hover(args: &Value) -> Result<Value> {
 /// DOM key name → (code, Windows virtual key, text it types).
 /// What one key press needs to look like to Blink.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct KeyInfo {
+pub(crate) struct KeyInfo {
     /// The DOM `KeyboardEvent.key`, canonically spelled — Blink's default
     /// actions compare it exactly (`"Tab"` moves focus, `"tab"` does nothing;
     /// a button activates on `" "`, not `"Space"`).
@@ -905,7 +905,7 @@ struct KeyInfo {
 
 /// Key name (any case; `Space` accepted for `" "`) or a single character →
 /// the event fields CDP needs.
-fn key_info(key: &str) -> Option<KeyInfo> {
+pub(crate) fn key_info(key: &str) -> Option<KeyInfo> {
     let named: &[(&str, &str, i64, Option<&str>)] = &[
         ("Enter", "Enter", 13, Some("\r")),
         ("Tab", "Tab", 9, None),
@@ -975,7 +975,7 @@ fn key_info(key: &str) -> Option<KeyInfo> {
     None
 }
 
-fn modifier_mask(modifiers: &str) -> i64 {
+pub(crate) fn modifier_mask(modifiers: &str) -> i64 {
     let mut m = 0;
     for p in modifiers.split(',').map(|s| s.trim().to_ascii_lowercase()) {
         m |= match p.as_str() {
@@ -1055,6 +1055,15 @@ async fn keyboard(args: &Value) -> Result<Value> {
 
 /// keyDown (or rawKeyDown for keys that type nothing) + keyUp.
 async fn press(info: &KeyInfo, modifiers: i64) -> Result<(), String> {
+    for params in key_event_params(info, modifiers) {
+        key_event(params).await?;
+    }
+    Ok(())
+}
+
+/// The two `Input.dispatchKeyEvent` calls of one key press. `keyboard
+/// --native` on WebView2 sends the same ones over its own CDP channel.
+pub(crate) fn key_event_params(info: &KeyInfo, modifiers: i64) -> [Value; 2] {
     // Ctrl/Meta chords type nothing; a plain key with text produces input.
     let typed = info.text.clone().filter(|_| modifiers & (2 | 4) == 0);
     let mut down = json!({
@@ -1073,8 +1082,7 @@ async fn press(info: &KeyInfo, modifiers: i64) -> Result<(), String> {
         "type": "keyUp", "key": info.key, "code": info.code,
         "windowsVirtualKeyCode": info.vk, "nativeVirtualKeyCode": info.vk, "modifiers": modifiers,
     });
-    key_event(down).await?;
-    key_event(up).await
+    [down, up]
 }
 
 async fn resize(args: &Value) -> Result<Value> {

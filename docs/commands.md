@@ -56,6 +56,7 @@ All commands except `start`, `stop`, `list`, `run`, `guide`, `install`, `tools`,
 | `fill-form --fields '<JSON>'` | Multiple fields: `'[{"selector":"#a","value":"1"}]'` |
 | `keyboard --text "hello" [--paste]` | Type character-by-character, or paste at once |
 | `keyboard --key Enter [--modifiers ctrl,shift]` | Press special keys |
+| `keyboard --key Tab --native` | Press a named key as a native key event: an `NSEvent` sent to the WebView's window on macOS, CDP `Input.dispatchKeyEvent` on Windows WebView2 (not on Linux). The page gets `isTrusted: true`, and focus crosses cross-origin iframes and closed shadow roots (Tab, then Space, ticks a Cloudflare Turnstile checkbox). No Accessibility permission; the mouse does not move. Not with `--text` |
 | `scroll --to top\|bottom [--selector CSS]` | Absolute scroll (page or SPA container) |
 | `scroll [--direction down] [--amount 500]` | Relative scroll |
 | `upload-file --selector "input[type=file]" --file PATH` | Upload file (max 50 MB) |
