@@ -507,7 +507,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 
         ToolDefinition {
             name: "keyboard_input".to_string(),
-            description: "Type text or press a special key. With `text`, types character-by-character (or pastes if `paste=true`). With `key`, presses a named key (Enter, Tab, Escape, ArrowDown, …) with optional modifiers.".to_string(),
+            description: "Type text or press a special key. With `text`, types character-by-character (or pastes if `paste=true`). With `key`, presses a named key (Enter, Tab, Escape, ArrowDown, …) with optional modifiers. On the WebView engine these key events come from JavaScript (`isTrusted: false`): Tab does not move focus and nothing reaches a cross-origin iframe in a closed shadow root. Add `native=true` with `key` to send a native key press instead (`isTrusted: true`; macOS NSEvent, Windows CDP; no Accessibility permission, the mouse does not move) — Tab then Space this way ticks a Cloudflare Turnstile checkbox. The Chrome engine's keys are always trusted.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -516,7 +516,8 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "key": { "type": "string", "description": "Named key to press (Enter, Tab, Escape, ArrowUp, …). Either text or key is required." },
                     "selector": { "type": "string", "description": "Optional CSS selector to focus before typing." },
                     "modifiers": { "type": "string", "description": "Comma-separated modifiers: ctrl, shift, alt, meta (e.g. `ctrl,shift`)." },
-                    "paste": { "type": "boolean", "description": "When true with `text`, paste the entire string at once via the native setter (fast). Default false." }
+                    "paste": { "type": "boolean", "description": "When true with `text`, paste the entire string at once via the native setter (fast). Default false." },
+                    "native": { "type": "boolean", "description": "Press `key` as a native key event, which the page receives with `isTrusted: true`: an NSEvent sent to the WebView's window on macOS, CDP `Input.dispatchKeyEvent` on Windows WebView2. Named keys only (Enter, Tab, Space, Backspace, Escape, Delete, Insert, Home, End, PageUp, PageDown, Arrow*); not with `text`. Not on Linux. Default false." }
                 }
             }),
         },
@@ -4795,6 +4796,10 @@ async fn tool_keyboard_input(args: &Value) -> Result<Value> {
 
     let paste = args["paste"].as_bool().unwrap_or(false);
 
+    if args["native"].as_bool().unwrap_or(false) {
+        return Ok(native_keyboard(text, key, selector, modifiers).await);
+    }
+
     // Detect a cross-origin iframe: check whether activeElement is an IFRAME
     if selector.is_none() {
         let detect_script = r#"var ae = document.activeElement;
@@ -5000,6 +5005,60 @@ async fn tool_keyboard_input(args: &Value) -> Result<Value> {
             "error": "KEYBOARD_INPUT_ERROR",
             "message": e
         })),
+    }
+}
+
+/// `keyboard --native`: press one named key as a native key event, which the
+/// page receives with `isTrusted: true` (macOS WKWebView, Windows WebView2).
+/// See `platform::native_keys`.
+async fn native_keyboard(
+    text: Option<&str>,
+    key: Option<&str>,
+    selector: Option<&str>,
+    modifiers: &str,
+) -> Value {
+    let Some(key_name) = key.filter(|_| text.is_none()) else {
+        return serde_json::json!({
+            "status": "failed",
+            "error": "NATIVE_KEY_ONLY",
+            "message": "--native presses one named key: use --key, without --text",
+        });
+    };
+    let Some(native_key) = crate::platform::native_key(key_name) else {
+        return serde_json::json!({
+            "status": "failed",
+            "error": "UNKNOWN_KEY",
+            "message": format!(
+                "--native has no key '{key_name}'. Keys: {}",
+                crate::platform::native_key_names().join(", ")
+            ),
+        });
+    };
+    if let Some(sel) = selector {
+        let focus = format!("{}; return true;", focus_script(Some(sel)));
+        if webview_execute_js(&focus, Some(5000)).await.ok() != Some(Value::Bool(true)) {
+            return serde_json::json!({
+                "status": "failed",
+                "error": "SELECTOR_NOT_FOUND",
+                "message": format!("Selector not found: {sel}"),
+            });
+        }
+    }
+    match crate::platform::native_key_press(native_key, modifiers).await {
+        Ok(press) => serde_json::json!({
+            "status": "completed",
+            "key": native_key.name,
+            "modifiers": modifiers,
+            "method": "native",
+            "transport": press.transport,
+            "trusted": true,
+            "first_responder": press.first_responder,
+        }),
+        Err(e) => serde_json::json!({
+            "status": "failed",
+            "error": "NATIVE_KEY_ERROR",
+            "message": e,
+        }),
     }
 }
 

@@ -724,6 +724,10 @@ enum Cli {
         /// Paste text at once using native setter (faster than character-by-character)
         #[arg(long)]
         paste: bool,
+        /// Press --key as a native key event (isTrusted: true; macOS and Windows).
+        /// Tab moves focus into cross-origin iframes, as for a Turnstile checkbox
+        #[arg(long, requires = "key", conflicts_with = "text")]
+        native: bool,
     },
 
     /// Find the nearest interactive element at coordinates (returns HTML + selector)
@@ -2170,6 +2174,7 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
             selector,
             modifiers,
             paste,
+            native,
         } => (
             id,
             "keyboard_input".into(),
@@ -2179,6 +2184,7 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
                 "selector": selector,
                 "modifiers": modifiers,
                 "paste": paste,
+                "native": native,
             }),
         ),
         Cli::ElementAt { id, x, y } => (
