@@ -261,6 +261,7 @@ pub fn install(
         // page back where it was, and say there is no toolbar.
         set_enabled(false);
         let _ = window.set_size(LogicalSize::new(page_width, page_height));
+        let _ = window.set_min_size(Some(LogicalSize::new(400.0, 300.0)));
         let page: &Webview = window.as_ref();
         let _ = page.set_auto_resize(true);
         let _ = page.set_bounds(rect(Frame {
@@ -383,7 +384,7 @@ fn push() {
     let Some(bar) = BAR.get() else { return };
     // The number and the snapshot are taken together, so a higher number is
     // always the newer state, whichever push the bar happens to receive first.
-    let _order = PUSH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let order = PUSH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let n = nav().clone();
     let state = json!({
         "seq": PUSH_SEQ.fetch_add(1, Ordering::SeqCst) + 1,
@@ -396,6 +397,10 @@ fn push() {
         },
         "activity": crate::activity::snapshot(),
     });
+    // The number and the snapshot are what the lock is for. Sending can wait on
+    // the main thread in some builds, so it happens outside it, and a late
+    // arrival is the bar's to drop by its number.
+    drop(order);
     // JSON is valid JavaScript, and the bar sets every string with textContent.
     let _ = bar.eval(format!("window.__bar&&window.__bar.set({state})"));
 }

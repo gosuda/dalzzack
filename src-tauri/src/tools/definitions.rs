@@ -555,8 +555,8 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "site": site_param(),
-                    "width": { "type": "integer", "description": "New window width in pixels (>= 100)." },
-                    "height": { "type": "integer", "description": "New window height in pixels (>= 100)." }
+                    "width": { "type": "integer", "description": "New PAGE width in pixels (>= 100); the window is taller by its toolbar." },
+                    "height": { "type": "integer", "description": "New PAGE height in pixels (>= 100); the window is taller by its toolbar." }
                 },
                 "required": ["width", "height"]
             }),
