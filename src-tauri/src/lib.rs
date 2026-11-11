@@ -48,6 +48,8 @@ pub mod response_headers;
 pub mod site_data;
 pub mod state;
 pub mod sw_console;
+/// The strip above the page: history, address, and the running command.
+pub mod toolbar;
 pub mod tools;
 /// `start --trust-cert`: extra trust anchors for one WKWebView instance.
 pub mod trust_cert;

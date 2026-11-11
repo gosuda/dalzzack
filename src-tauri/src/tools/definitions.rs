@@ -1208,6 +1208,12 @@ async fn tool_history(_args: &Value, dir: &str) -> Result<Value> {
         elapsed_ms += POLL_INTERVAL_MS;
     }
 
+    let changed = !before.is_empty() && before != after_url;
+    if changed {
+        // The toolbar keeps its own place in the history: no page can say.
+        crate::toolbar::note_history_step(dir == "back");
+    }
+
     Ok(serde_json::json!({
         "status": "completed",
         "direction": dir,
@@ -1216,7 +1222,7 @@ async fn tool_history(_args: &Value, dir: &str) -> Result<Value> {
         "title": last["title"],
         "ready_state": last["ready"],
         "elapsed_ms": elapsed_ms,
-        "changed": !before.is_empty() && before != after_url,
+        "changed": changed,
     }))
 }
 
@@ -1750,7 +1756,11 @@ async fn tool_resize_window(args: &Value) -> Result<Value> {
         .ok_or_else(|| anyhow!("Main window not found"))?;
 
     window
-        .set_size(LogicalSize::new(width as f64, height as f64))
+        // The size asked for is the page's; the toolbar is on top of it.
+        .set_size(LogicalSize::new(
+            width as f64,
+            height as f64 + crate::toolbar::extra_height(&window),
+        ))
         .map_err(|e| anyhow!("set_size failed: {}", e))?;
 
     tracing::info!("[resize_window] Resized to {}x{}", width, height);
@@ -2838,8 +2848,32 @@ async fn capture_page(
     }
     #[cfg(not(target_os = "windows"))]
     {
-        capture_with_xcap(file_path, crop_rect).await
+        // The window pixels include the title bar and the toolbar, so without
+        // a selector the whole page is the crop: Windows and Chrome capture the
+        // page alone, and the picture should not depend on the platform.
+        let page_only = match crop_rect {
+            Some(rect) => Some(rect.clone()),
+            None => viewport_rect().await,
+        };
+        capture_with_xcap(file_path, &page_only).await
     }
+}
+
+/// The whole viewport as a crop rect, in CSS pixels. `None` when the page will
+/// not say, and then the capture keeps the window as it is.
+#[cfg(not(target_os = "windows"))]
+async fn viewport_rect() -> Option<Value> {
+    let answer = webview_execute_js(
+        "return JSON.stringify({vw: window.innerWidth, vh: window.innerHeight});",
+        Some(2000),
+    )
+    .await
+    .ok()?;
+    let size: Value = serde_json::from_str(answer.as_str()?).ok()?;
+    let (vw, vh) = (size["vw"].as_f64()?, size["vh"].as_f64()?);
+    (vw > 0.0 && vh > 0.0).then(
+        || serde_json::json!({ "x": 0, "y": 0, "width": vw, "height": vh, "vw": vw, "vh": vh }),
+    )
 }
 
 /// Windows: take a screenshot via the WebView2 CapturePreview API.

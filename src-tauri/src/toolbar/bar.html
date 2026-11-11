@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dalzzack toolbar</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{
+  color-scheme:light;
+  --ink:#2b1b4e; --ink2:#43316c; --muted:#56437e;
+  --bar:#e9d8fa; --line:rgba(43,27,78,.16);
+  --glass:rgba(255,255,255,.7); --glass-line:rgba(255,255,255,.9);
+  --ready:#5fe3aa; --ready-ink:#0f5f3e;
+  --run:#a98af4; --run-ink:#43316c;
+  --fail:#ff7f9f; --fail-ink:#9d2250;
+  --prompt:#8a2d69;
+  --sans:system-ui,-apple-system,"Segoe UI Variable Text","Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono","Cascadia Code",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--bar)}
+body{font-family:var(--sans);color:var(--ink);-webkit-font-smoothing:antialiased;
+  display:flex;flex-direction:column;user-select:none;-webkit-user-select:none;cursor:default}
+
+/* ---------- top row: history, reload, address ---------- */
+.nav{position:relative;display:flex;align-items:center;gap:6px;height:36px;padding:0 10px;flex:none}
+.btn{width:28px;height:28px;flex:none;border-radius:8px;border:1px solid var(--glass-line);background:var(--glass);
+  display:flex;align-items:center;justify-content:center;color:var(--ink);text-decoration:none}
+.btn:hover{background:rgba(255,255,255,.92)}
+.btn:active{background:rgba(255,255,255,.5)}
+.btn[aria-disabled="true"]{opacity:.4;pointer-events:none}
+.btn:focus-visible,.addr input:focus-visible{outline:2px solid var(--ink2);outline-offset:1px}
+.btn svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+.addr{flex:1;min-width:0;height:28px;margin:0;border-radius:14px;border:1px solid var(--glass-line);background:var(--glass);
+  display:flex;align-items:center;gap:7px;padding:0 12px}
+.addr svg{width:13px;height:13px;flex:none;fill:none;stroke:var(--muted);stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.addr input{flex:1;min-width:0;height:100%;border:0;background:transparent;font:13px var(--sans);color:var(--ink);
+  text-overflow:ellipsis;user-select:text;-webkit-user-select:text;cursor:text}
+.addr input::placeholder{color:var(--muted)}
+.addr input:focus-visible{outline:0}
+.addr:focus-within{outline:2px solid var(--ink2);outline-offset:1px;background:rgba(255,255,255,.92)}
+.load{position:absolute;left:0;bottom:0;height:2px;width:0;background:var(--run);border-radius:0 2px 2px 0;opacity:0}
+.loading .load{opacity:1;width:62%}
+
+/* ---------- bottom row: what this window is doing ---------- */
+.act{display:flex;align-items:center;gap:8px;height:28px;padding:0 12px;flex:none;
+  background:rgba(255,255,255,.35);border-top:1px solid rgba(255,255,255,.7);border-bottom:1px solid var(--line)}
+.dot{width:10px;height:10px;border-radius:50%;flex:none;background:var(--ready);box-shadow:0 0 0 3px rgba(95,227,170,.2)}
+.state{font-size:11px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;flex:none;color:var(--ready-ink)}
+.cmd{flex:1;min-width:0;font:12px var(--mono);color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  user-select:text;-webkit-user-select:text;cursor:text}
+.cmd .p{color:var(--prompt)}
+.more{flex:none;font-size:11px;font-weight:800;color:var(--run-ink);background:rgba(169,138,244,.3);border-radius:10px;padding:2px 8px}
+.time{flex:none;font:12px var(--mono);color:var(--muted)}
+[hidden]{display:none!important}
+
+.s-running .dot{background:var(--run);box-shadow:0 0 0 3px rgba(169,138,244,.2)}
+.s-running .state{color:var(--run-ink)}
+.s-failed .dot{background:var(--fail);box-shadow:0 0 0 3px rgba(255,127,159,.2)}
+.s-failed .state{color:var(--fail-ink)}
+.s-idle .cmd,.s-done .cmd{opacity:.78}
+
+@media (max-width:559px){.state{display:none}}
+@media (prefers-reduced-motion:no-preference){
+  .s-running .dot{animation:pulse 1.4s ease-in-out infinite}
+  .btn{transition:background-color .12s ease}
+  @keyframes pulse{50%{box-shadow:0 0 0 5px rgba(169,138,244,.12)}}
+}
+</style>
+</head>
+<body class="s-idle">
+<div class="nav" id="nav">
+  <a class="btn" id="back" href="https://dalzzack.invalid/back" aria-label="Back" aria-disabled="true">
+    <svg aria-hidden="true" viewBox="0 0 16 16"><path d="M10 3 5 8l5 5"/></svg>
+  </a>
+  <a class="btn" id="forward" href="https://dalzzack.invalid/forward" aria-label="Forward" aria-disabled="true">
+    <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m6 3 5 5-5 5"/></svg>
+  </a>
+  <a class="btn" id="reload" href="https://dalzzack.invalid/reload" aria-label="Reload">
+    <svg aria-hidden="true" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13 2.5v3h-3"/></svg>
+  </a>
+  <form class="addr" id="go" action="https://dalzzack.invalid/go" method="get" autocomplete="off">
+    <svg aria-hidden="true" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="2"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>
+    <input id="addr" name="u" type="text" spellcheck="false" autocapitalize="off" aria-label="Address" placeholder="Enter an address">
+  </form>
+  <div class="load" aria-hidden="true"></div>
+</div>
+<div class="act" id="act">
+  <span class="dot" id="dot" aria-hidden="true"></span>
+  <span class="state" id="state">ready</span>
+  <span class="cmd" id="cmd"></span>
+  <span class="more" id="more" hidden></span>
+  <span class="time" id="time"></span>
+</div>
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var body = document.body, nav = $("nav"), addr = $("addr");
+  var back = $("back"), forward = $("forward");
+  var cur = null, ticker = null;
+
+  var WORD = { idle: "ready", running: "running", done: "done", failed: "failed" };
+
+  function seconds(ms) {
+    if (!(ms >= 0)) { return ""; }
+    if (ms < 60000) { return (ms / 1000).toFixed(1) + "s"; }
+    var s = Math.floor(ms / 1000);
+    return Math.floor(s / 60) + "m " + (s % 60) + "s";
+  }
+
+  function setEnabled(el, on) {
+    el.setAttribute("aria-disabled", on ? "false" : "true");
+    if (on) { el.setAttribute("tabindex", "0"); } else { el.setAttribute("tabindex", "-1"); }
+  }
+
+  function tick() {
+    if (cur && cur.activity.state === "running") {
+      $("time").textContent = seconds(Date.now() - cur.activity.since);
+    }
+  }
+
+  function render() {
+    var s = cur, a = s.activity, n = s.nav;
+
+    var landing = !n.url;
+    if (document.activeElement !== addr) {
+      addr.value = landing ? "" : n.url;
+      addr.placeholder = landing ? "dalzzack · instance " + s.id : "Enter an address";
+    }
+    nav.classList.toggle("loading", !!n.loading);
+    setEnabled(back, !!n.canBack);
+    setEnabled(forward, !!n.canForward);
+
+    body.className = "s-" + a.state;
+    $("state").textContent = WORD[a.state] || a.state;
+
+    var cmd = $("cmd");
+    cmd.textContent = "";
+    if (a.cmd) {
+      var p = document.createElement("span");
+      p.className = "p";
+      p.textContent = "$ ";
+      cmd.appendChild(p);
+      cmd.appendChild(document.createTextNode(a.cmd));
+      cmd.title = a.cmd;
+    } else {
+      cmd.textContent = "waiting for a command";
+      cmd.removeAttribute("title");
+    }
+
+    var more = $("more");
+    more.hidden = !(a.more > 0);
+    more.textContent = a.more > 0 ? "+" + a.more + " more" : "";
+
+    if (a.state === "running") {
+      tick();
+      if (!ticker) { ticker = setInterval(tick, 100); }
+    } else {
+      if (ticker) { clearInterval(ticker); ticker = null; }
+      $("time").textContent = a.state === "idle" ? "" : seconds(a.took);
+    }
+  }
+
+  // A person editing the address keeps what they typed; leaving the field puts
+  // the page's own address back.
+  // Like any address bar, the first click selects the whole address. The mouse
+  // button coming up would put the caret back, so that one event is cancelled.
+  var justFocused = false;
+  addr.addEventListener("focus", function () { justFocused = true; addr.select(); });
+  addr.addEventListener("mouseup", function (e) {
+    if (justFocused) { e.preventDefault(); justFocused = false; }
+  });
+  addr.addEventListener("blur", function () { justFocused = false; if (cur) { render(); } });
+  addr.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { addr.blur(); }
+  });
+  // After Enter the field gives the address back to the page, which shows the
+  // new one when it has loaded.
+  $("go").addEventListener("submit", function () {
+    setTimeout(function () { addr.blur(); }, 0);
+  });
+
+  window.__bar = {
+    set: function (state) { cur = state; render(); }
+  };
+})();
+</script>
+</body>
+</html>

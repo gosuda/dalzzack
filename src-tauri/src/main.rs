@@ -139,6 +139,13 @@ enum Cli {
         /// never disable CSP and this flag is a no-op there. `list` reports `csp_bypassed`.
         #[arg(long = "enforce-csp")]
         enforce_csp: bool,
+        /// Open a bare window with only the page in it. By default a window has a strip
+        /// above the page: back, forward, reload, the address, and the command it is
+        /// running now (typed values masked). `--width`/`--height` are the page's size
+        /// either way. Ignored if the instance is already running; `--engine chrome` has
+        /// Chrome's own toolbar and never gets this one.
+        #[arg(long = "no-toolbar")]
+        no_toolbar: bool,
         /// Give this instance its OWN browser profile (cookies, storage, cache): empty at start,
         /// deleted by `stop`. Plain instances share one WebView2 profile — a login in one carries over to
         /// the next, and `cookies clear` / `reset` in one would hit all of them (so those refuse
@@ -1362,6 +1369,8 @@ enum Cli {
         raw_user_agent: bool,
         #[arg(long = "enforce-csp")]
         enforce_csp: bool,
+        #[arg(long = "no-toolbar")]
+        no_toolbar: bool,
         #[arg(long = "private-profile")]
         private_profile: bool,
         #[arg(long, default_value = "webview")]
@@ -1623,6 +1632,7 @@ fn main() {
             user_agent,
             raw_user_agent,
             enforce_csp,
+            no_toolbar,
             private_profile,
             engine,
             chrome_path,
@@ -1668,6 +1678,7 @@ fn main() {
                         user_agent,
                         raw_user_agent,
                         enforce_csp,
+                        no_toolbar,
                         private_profile,
                         engine,
                         engine_given,
@@ -1709,6 +1720,7 @@ fn main() {
             user_agent,
             raw_user_agent,
             enforce_csp,
+            no_toolbar,
             private_profile,
             engine,
             chrome_path,
@@ -1738,6 +1750,7 @@ fn main() {
                     user_agent,
                     raw_user_agent,
                     enforce_csp,
+                    no_toolbar,
                     private_profile,
                     engine,
                     engine_given: true,
