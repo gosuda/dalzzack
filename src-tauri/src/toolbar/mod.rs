@@ -722,6 +722,35 @@ mod tests {
     }
 
     #[test]
+    fn a_web_page_is_granted_no_tauri_ipc() {
+        // The bar is a second webview in the page's own window, and Tauri's
+        // webview commands take a label, so any permission the page holds can
+        // reach the bar. A page has no use for IPC (it is driven natively), so
+        // the capability names no remote URL at all: nothing granted to a page,
+        // and so nothing that can list, hide, move or close the bar.
+        let capability: Value =
+            serde_json::from_str(include_str!("../../capabilities/default.json")).unwrap();
+        assert!(
+            capability.get("remote").is_none(),
+            "a capability with `remote` grants its permissions to web pages: {capability}"
+        );
+        let permissions = capability["permissions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for permission in permissions {
+            let id = permission["identifier"]
+                .as_str()
+                .or(permission.as_str())
+                .unwrap_or("");
+            assert!(
+                !id.starts_with("core:webview") && id != "core:default",
+                "{id} lets a window's script manage its webviews, the bar included"
+            );
+        }
+    }
+
+    #[test]
     fn the_landing_page_has_no_address() {
         assert_eq!(shown_address("data:text/html;base64,AAAA"), "");
         assert_eq!(

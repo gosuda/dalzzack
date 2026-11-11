@@ -19,6 +19,10 @@ All notable changes to dalzzack. The format loosely follows
 
 ### Changed
 
+- A web page is no longer granted any Tauri IPC. The window's capability named
+  every `http(s)` page and let it list, hide, move, resize and close webviews, and
+  close the window, which nothing in dalzzack used and which would have let a page
+  take the toolbar away. Pages are driven natively, so no command is affected.
 - `--width`/`--height` and `resize` give the page's size, and the window is taller
   by the toolbar. On macOS a window with the toolbar now has a page exactly as
   tall as asked; a window without it keeps its page 32 px shorter than asked,
