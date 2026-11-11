@@ -42,7 +42,8 @@ const SHOWN: &[&str] = &[
     "resource-type",
 ];
 
-/// A URL can carry a token in its query or fragment, so only up to there shows.
+/// A URL can carry a token in its query or fragment, so only up to there shows,
+/// and never the credentials in front of its host.
 const URL_FLAGS: &[&str] = &["url", "to", "url-pattern"];
 
 /// Output flags and the instance id say nothing about what the window is doing.
@@ -74,6 +75,24 @@ fn quoted(value: &str) -> String {
     }
 }
 
+/// `text` without the userinfo of its authority: `https://user:pw@host/p` becomes
+/// `https://host/p`. Text with no `scheme://authority` is returned as it is, and
+/// an `@` after the authority (`/p@q`, `?mail=a@b`) is not userinfo.
+///
+/// Credentials in a URL are secrets wherever it is shown, so the command line and
+/// the address bar both go through this. A browser's address bar shows the rest
+/// of a page's address, path and query included, and never the userinfo.
+pub fn without_userinfo(text: &str) -> String {
+    let Some((scheme, rest)) = text.split_once("://") else {
+        return text.to_string();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..end].rfind('@') {
+        Some(at) => format!("{scheme}://{}{}", &rest[at + 1..end], &rest[end..]),
+        None => text.to_string(),
+    }
+}
+
 fn shown_value(flag: &str, value: &str, command: Option<&str>) -> String {
     // `keyboard --text` is what gets typed; everywhere else `--text` is the
     // visible text to look for.
@@ -81,9 +100,10 @@ fn shown_value(flag: &str, value: &str, command: Option<&str>) -> String {
         return MASK.to_string();
     }
     if URL_FLAGS.contains(&flag) {
+        let value = without_userinfo(value);
         return match value.find(['?', '#']) {
             Some(cut) => format!("{}?…", clip(&value[..cut])),
-            None => quoted(&clip(value)),
+            None => quoted(&clip(&value)),
         };
     }
     quoted(&clip(value))
@@ -195,6 +215,53 @@ mod tests {
         assert_eq!(
             label("navigate --url=https://x.test/login"),
             "navigate --url https://x.test/login"
+        );
+    }
+
+    #[test]
+    fn credentials_in_a_url_never_show() {
+        // The password in the userinfo, with and without a port, a path, a query.
+        assert_eq!(
+            label("navigate --url https://admin:hunter2@staging.test/"),
+            "navigate --url https://staging.test/"
+        );
+        assert_eq!(
+            label("navigate --url https://admin:hunter2@staging.test:8443/a/b"),
+            "navigate --url https://staging.test:8443/a/b"
+        );
+        assert_eq!(
+            label("navigate --url https://admin:hunter2@staging.test/a?t=1#f"),
+            "navigate --url https://staging.test/a?…"
+        );
+        assert_eq!(
+            label("navigate --url=https://u:p@h.test"),
+            "navigate --url https://h.test"
+        );
+        // An @ inside the userinfo itself: everything up to the last one goes.
+        assert_eq!(
+            label("navigate --url https://a@b:pw@h.test/x"),
+            "navigate --url https://h.test/x"
+        );
+    }
+
+    #[test]
+    fn an_at_sign_after_the_host_is_not_userinfo() {
+        assert_eq!(
+            label("navigate --url https://h.test/a@b"),
+            "navigate --url https://h.test/a@b"
+        );
+        assert_eq!(
+            label("navigate --url https://h.test?mail=a@b"),
+            "navigate --url https://h.test?…"
+        );
+        // A path or a pattern is not a URL with an authority.
+        assert_eq!(
+            label("wait-navigation --to /zp/p/"),
+            "wait-navigation --to /zp/p/"
+        );
+        assert_eq!(
+            label("wait-navigation --to a@b/c"),
+            "wait-navigation --to a@b/c"
         );
     }
 

@@ -367,7 +367,8 @@ fn shown_address(url: &str) -> String {
     if url.starts_with("data:") {
         String::new()
     } else {
-        url.to_string()
+        // Like a browser's address bar, everything but the credentials.
+        crate::cli::label::without_userinfo(url)
     }
 }
 
@@ -703,6 +704,21 @@ mod tests {
         n.observe("https://a.test/".into(), 2);
         n.observe("https://a.test/after-redirect".into(), 2);
         assert!(n.can_back() && !n.can_forward());
+    }
+
+    #[test]
+    fn the_address_bar_never_shows_credentials() {
+        // A browser shows the page's address, path and query included, and
+        // never the userinfo.
+        assert_eq!(
+            shown_address("https://admin:hunter2@staging.test:8443/a?t=1#f"),
+            "https://staging.test:8443/a?t=1#f"
+        );
+        assert_eq!(shown_address("http://user@host.test/"), "http://host.test/");
+        assert_eq!(
+            shown_address("https://host.test/a@b?x=y@z"),
+            "https://host.test/a@b?x=y@z"
+        );
     }
 
     #[test]
