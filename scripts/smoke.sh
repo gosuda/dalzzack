@@ -64,6 +64,28 @@ if [ "$TITLE" != "Example Domain" ]; then
   exit 1
 fi
 
+step "the toolbar leaves the page the size it was asked to be"
+# The window has a strip above the page (history, address, running command). The
+# page must still be the default 1200x800, and a screenshot must be the page
+# alone: no title bar, no strip.
+SIZE=$(dalzzack exec-js -i "$ID" --script 'return innerWidth + "x" + innerHeight' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("result",""))')
+if [ "$SIZE" != "1200x800" ]; then
+  echo "FAIL: expected a 1200x800 page under the toolbar, got $SIZE" >&2
+  exit 1
+fi
+dalzzack screenshot -i "$ID" --output "$WORKDIR/size.png" >/dev/null
+python3 - "$WORKDIR/size.png" <<'PY'
+import struct, sys
+with open(sys.argv[1], "rb") as f:
+    head = f.read(24)
+w, h = struct.unpack(">II", head[16:24])
+scale = w / 1200
+if abs(h - 800 * scale) > 1:
+    raise SystemExit(f"FAIL: screenshot is {w}x{h}; a 1200x800 page at {scale}x is {w}x{800 * scale:.0f}")
+print(f"screenshot {w}x{h} = the page alone at {scale}x")
+PY
+
 step "describe"
 DESC=$(dalzzack describe -i "$ID" --output "$WORKDIR/describe.png")
 echo "$DESC" | head -10

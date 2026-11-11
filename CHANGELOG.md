@@ -4,6 +4,30 @@ All notable changes to dalzzack. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [SemVer](https://semver.org).
 
+## [Unreleased]
+
+### Added
+
+- Every window now has a toolbar above the page: back, forward, reload, the
+  address (type in it and press Enter), and a line showing the command the window
+  is running, its state and how long it has taken. The command is shown as typed,
+  with typed values (`--value`, `keyboard --text`, scripts, and every flag not
+  known to name a place or a setting) replaced by `••••`, and URLs cut before the
+  query. Several commands at once show the oldest and count the rest. It is a
+  separate view: nothing is added to the page. `start --no-toolbar` opens the
+  bare window. `--engine chrome` has Chrome's own toolbar and is unchanged.
+
+### Changed
+
+- `--width`/`--height` and `resize` give the page's size, and the window is taller
+  by the toolbar. On macOS a window with the toolbar now has a page exactly as
+  tall as asked; a window without it keeps its page 32 px shorter than asked,
+  because the title bar covers the top.
+- macOS `screenshot` and `describe` now return the page alone, as Windows and the
+  Chrome engine already did. They included the title bar before.
+- macOS native `click`/`hover` coordinates were 4 px above their target (a fixed
+  28 px title bar against a real 32 px). The title bar is now measured.
+
 ## [1.3.0] - 2026-11-09
 
 ### Added
