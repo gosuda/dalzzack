@@ -588,6 +588,7 @@ pub fn run_with_instance_id(opts: AppOptions) {
                     tracing::error!("!!! Failed to create main window: {} !!!", e);
                     panic!("Failed to create main window: {}", e);
                 });
+            crate::state::set_main_window(window.clone());
 
             // When the user closes the window, shut the whole daemon down.
             // Otherwise the TCP server keeps running with no WebView attached,

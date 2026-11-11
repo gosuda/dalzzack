@@ -1728,8 +1728,7 @@ pub(crate) async fn tool_get_response_headers(args: &Value) -> Result<Value> {
 
 /// resize_window — resize the WebView window.
 async fn tool_resize_window(args: &Value) -> Result<Value> {
-    use crate::APP_HANDLE;
-    use tauri::{LogicalSize, Manager};
+    use tauri::LogicalSize;
 
     let width = args["width"]
         .as_u64()
@@ -1746,12 +1745,8 @@ async fn tool_resize_window(args: &Value) -> Result<Value> {
         }));
     }
 
-    let app_handle = APP_HANDLE.read().await;
-    let app = app_handle
-        .as_ref()
-        .ok_or_else(|| anyhow!("AppHandle not available"))?;
-    let window = app
-        .get_webview_window("main")
+    let window = crate::state::get_main_window()
+        .await
         .ok_or_else(|| anyhow!("Main window not found"))?;
 
     window
@@ -2853,9 +2848,7 @@ async fn capture_webview_screenshot(
     file_path: &std::path::Path,
     crop_rect: &Option<Value>,
 ) -> Result<(), String> {
-    use crate::APP_HANDLE;
     use std::sync::mpsc;
-    use tauri::Manager;
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         ICoreWebView2, ICoreWebView2CapturePreviewCompletedHandler,
         ICoreWebView2CapturePreviewCompletedHandler_Impl,
@@ -2869,11 +2862,8 @@ async fn capture_webview_screenshot(
     let file_path = file_path.to_path_buf();
     let crop_rect = crop_rect.clone();
 
-    // Get the WebviewWindow from the AppHandle
-    let app_handle = APP_HANDLE.read().await;
-    let app = app_handle.as_ref().ok_or("AppHandle not available")?;
-    let window = app
-        .get_webview_window("main")
+    let window = crate::state::get_main_window()
+        .await
         .ok_or("Main window not found")?;
 
     // Receive the result through a channel
