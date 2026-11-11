@@ -1833,7 +1833,12 @@ fn main() {
             }
             let id = resolve_instance_id(id);
             let pathconv = shell_pathconv_suspects(&args);
-            let result = dalzzack_lib::daemon::send_command(&id, &tool_name, args.clone());
+            // What the window's toolbar shows: the command line as typed, with
+            // typed values already masked.
+            let typed: Vec<String> = std::env::args().skip(1).collect();
+            let display = dalzzack_lib::cli::command_label(&typed);
+            let result =
+                dalzzack_lib::daemon::send_labeled(&id, &tool_name, args.clone(), Some(display));
             match result {
                 Ok(mut output) => {
                     // Git-Bash (MSYS2) rewrites any argv starting with `/` into a
@@ -1889,7 +1894,7 @@ fn command_step(line: &serde_json::Value) -> Result<dalzzack_lib::cli::Step, Str
         .map(|words| words.iter().map(|word| word.as_str()).collect())
         .unwrap_or_default();
     let words = words.ok_or("expected a list of strings")?;
-    let parsed = Args::try_parse_from(std::iter::once("dalzzack").chain(words))
+    let parsed = Args::try_parse_from(std::iter::once("dalzzack").chain(words.iter().copied()))
         .map_err(|e| usage_message(&e))?;
     if matches!(
         parsed.cmd,
@@ -1911,9 +1916,11 @@ fn command_step(line: &serde_json::Value) -> Result<dalzzack_lib::cli::Step, Str
     if !id.is_empty() {
         return Err("a step cannot name an instance: `run --id` chooses it".to_string());
     }
+    let typed: Vec<String> = words.iter().map(|word| word.to_string()).collect();
     Ok(dalzzack_lib::cli::Step {
         tool,
         args: Some(args),
+        display: Some(dalzzack_lib::cli::command_label(&typed)),
     })
 }
 
@@ -1928,8 +1935,11 @@ fn run_on_instance(
     let mut last = serde_json::Value::Null;
     for (i, step) in steps.into_iter().enumerate() {
         let args = step.args.unwrap_or_else(|| serde_json::json!({}));
-        let result = dalzzack_lib::daemon::send_command(id, &step.tool, args.clone())
-            .unwrap_or_else(|e| serde_json::json!({ "status": "failed", "error": e.to_string() }));
+        let result =
+            dalzzack_lib::daemon::send_labeled(id, &step.tool, args.clone(), step.display.clone())
+                .unwrap_or_else(
+                    |e| serde_json::json!({ "status": "failed", "error": e.to_string() }),
+                );
         if result["status"] == "failed" {
             let failed = serde_json::json!({
                 "status": "failed",

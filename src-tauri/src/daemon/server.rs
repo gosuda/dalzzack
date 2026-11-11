@@ -1300,7 +1300,16 @@ async fn handle_connection(
         }
     }
 
-    let result = crate::tools::definitions::execute_tool(&request.tool, &args).await;
+    // The window's toolbar shows the CLI's masked label, never the arguments.
+    let label = request
+        .display
+        .clone()
+        .unwrap_or_else(|| request.tool.clone());
+    let result = crate::activity::track(
+        label,
+        crate::tools::definitions::execute_tool(&request.tool, &args),
+    )
+    .await;
 
     let response = match result {
         Ok(output) => DaemonResponse {

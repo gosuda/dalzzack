@@ -15,6 +15,16 @@ pub fn send_command(
     tool: &str,
     args: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    send_labeled(instance_id, tool, args, None)
+}
+
+/// [`send_command`] with the label the window's toolbar shows for it.
+pub fn send_labeled(
+    instance_id: &str,
+    tool: &str,
+    args: serde_json::Value,
+    display: Option<String>,
+) -> Result<serde_json::Value, String> {
     let port = read_port(instance_id).ok_or_else(|| {
         format!(
             "No daemon running with id '{}'. Start one with: dalzzack start --id {}",
@@ -38,6 +48,7 @@ pub fn send_command(
     let request = DaemonRequest {
         tool: tool.to_string(),
         args,
+        display,
     };
     let request_str = serde_json::to_string(&request).map_err(|e| e.to_string())?;
 
