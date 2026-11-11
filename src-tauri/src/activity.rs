@@ -240,6 +240,32 @@ mod tests {
         assert_eq!(t.snapshot()["state"], "done");
     }
 
+    #[tokio::test]
+    async fn track_records_how_a_command_ended() {
+        // The one test that uses the process-wide tracker, so it checks only what
+        // no other test can change: the label it just ran, and how it ended.
+        let ok = track("wait-for --selector #a".into(), async {
+            Ok(json!({ "status": "completed" }))
+        })
+        .await;
+        assert!(ok.is_ok());
+        let s = snapshot();
+        assert_eq!(text(&s, "cmd"), "wait-for --selector #a");
+        assert_eq!(s["state"], "done");
+
+        let failed = track("click --selector #b".into(), async {
+            Ok(json!({ "status": "failed" }))
+        })
+        .await;
+        assert!(failed.is_ok(), "the result is handed back as it was");
+        let s = snapshot();
+        assert_eq!(text(&s, "cmd"), "click --selector #b");
+        assert_eq!(s["state"], "failed");
+
+        let _ = track("navigate".into(), async { Err(anyhow::anyhow!("boom")) }).await;
+        assert_eq!(snapshot()["state"], "failed");
+    }
+
     #[test]
     fn a_tool_failure_inside_ok_is_a_failure() {
         assert!(succeeded(&Ok(json!({ "status": "completed" }))));

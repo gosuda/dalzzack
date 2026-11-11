@@ -67,10 +67,10 @@ enum Cli {
         /// Unique instance ID (auto-generates PID-based if omitted)
         #[arg(long, short)]
         id: Option<String>,
-        /// Initial WebView window width in pixels (default: 1200). Ignored if daemon already running.
+        /// Initial PAGE width in pixels (default: 1200). The window is taller by its toolbar. Ignored if daemon already running.
         #[arg(long)]
         width: Option<u32>,
-        /// Initial WebView window height in pixels (default: 800). Ignored if daemon already running.
+        /// Initial PAGE height in pixels (default: 800). The window is taller by its toolbar. Ignored if daemon already running.
         #[arg(long)]
         height: Option<u32>,
         /// Enable always-on background event recording so `dump-recording` works even when the
@@ -187,10 +187,10 @@ enum Cli {
         /// Instance ID of the running daemon
         #[arg(long, short, default_value = "")]
         id: String,
-        /// New window width in pixels (>= 100)
+        /// New PAGE width in pixels (>= 100)
         #[arg(long)]
         width: u32,
-        /// New window height in pixels (>= 100)
+        /// New PAGE height in pixels (>= 100)
         #[arg(long)]
         height: u32,
     },
@@ -1848,7 +1848,10 @@ fn main() {
             let pathconv = shell_pathconv_suspects(&args);
             // What the window's toolbar shows: the command line as typed, with
             // typed values already masked.
-            let typed: Vec<String> = std::env::args().skip(1).collect();
+            let typed: Vec<String> = std::env::args_os()
+                .skip(1)
+                .map(|word| word.to_string_lossy().into_owned())
+                .collect();
             let display = dalzzack_lib::cli::command_label(&typed);
             let result =
                 dalzzack_lib::daemon::send_labeled(&id, &tool_name, args.clone(), Some(display));
@@ -2963,7 +2966,22 @@ mod tests {
         with_main_stack(|| {
             let step = command_step(&json!(["click", "--text", "Sign In"])).unwrap();
             assert_eq!(step.tool, "click_element");
+            assert_eq!(step.display.as_deref(), Some("click --text \"Sign In\""));
             assert_eq!(step.args.unwrap()["text"], "Sign In");
+
+            // What a step types is masked in the label, as for a single command.
+            let step = command_step(&json!([
+                "fill-form",
+                "--selector",
+                "#pw",
+                "--value",
+                "hunter2"
+            ]))
+            .unwrap();
+            assert_eq!(
+                step.display.as_deref(),
+                Some("fill-form --selector #pw --value ••••")
+            );
 
             let step = command_step(&json!(["get-html", "--selector", "h1"])).unwrap();
             assert_eq!(step.tool, "get_html");

@@ -612,6 +612,8 @@ pub fn run_with_instance_id(opts: AppOptions) {
                     panic!("Failed to create main window: {}", e);
                 });
             crate::state::set_main_window(window.clone());
+            // Read on the main thread, for the native mouse code that cannot.
+            crate::toolbar::measure_title_inset(&window);
 
             if crate::toolbar::is_enabled() {
                 let id = instance_id_clone.as_deref().unwrap_or("default");

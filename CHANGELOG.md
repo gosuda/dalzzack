@@ -25,12 +25,12 @@ All notable changes to dalzzack. The format loosely follows
   take the toolbar away. Pages are driven natively, so no command is affected.
 - `--width`/`--height` and `resize` give the page's size, and the window is taller
   by the toolbar. On macOS a window with the toolbar now has a page exactly as
-  tall as asked; a window without it keeps its page 32 px shorter than asked,
+  tall as asked; a window without it keeps its page about 32 px shorter than asked,
   because the title bar covers the top.
 - macOS `screenshot` and `describe` now return the page alone, as Windows and the
   Chrome engine already did. They included the title bar before.
 - macOS native `click`/`hover` coordinates were 4 px above their target (a fixed
-  28 px title bar against a real 32 px). The title bar is now measured.
+  28 px title bar against the real one, 32 px here). The title bar is now measured.
 
 ## [1.3.0] - 2026-11-09
 

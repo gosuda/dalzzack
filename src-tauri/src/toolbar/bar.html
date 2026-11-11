@@ -182,8 +182,16 @@ body{font-family:var(--sans);color:var(--ink);-webkit-font-smoothing:antialiased
     setTimeout(function () { addr.blur(); }, 0);
   });
 
+  // States are numbered by the host and can arrive out of order; an older one
+  // never replaces a newer one.
+  var lastSeq = 0;
   window.__bar = {
-    set: function (state) { cur = state; render(); }
+    set: function (state) {
+      if (state.seq <= lastSeq) { return; }
+      lastSeq = state.seq;
+      cur = state;
+      render();
+    }
   };
 })();
 </script>

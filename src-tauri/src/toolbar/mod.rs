@@ -14,7 +14,7 @@
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use tauri::webview::{PageLoadEvent, WebviewBuilder};
 use tauri::{
@@ -36,6 +36,13 @@ static BAR: OnceLock<Webview> = OnceLock::new();
 static INSTANCE: OnceLock<String> = OnceLock::new();
 static NAV: Mutex<Nav> = Mutex::new(Nav::new());
 static PROBING: AtomicBool = AtomicBool::new(false);
+/// Pushes are numbered under a lock so the bar can drop one that arrives late:
+/// they are sent from any thread, and from the main thread they overtake the
+/// ones still queued.
+static PUSH_LOCK: Mutex<()> = Mutex::new(());
+static PUSH_SEQ: AtomicU64 = AtomicU64::new(0);
+/// The title bar's height as last measured (an `f64`'s bits).
+static TITLE_INSET: AtomicU64 = AtomicU64::new(0);
 
 /// What the bar knows about the page.
 ///
@@ -43,7 +50,13 @@ static PROBING: AtomicBool = AtomicBool::new(false);
 /// asked: `history.length` counts entries but not where in them the page is, and
 /// the Navigation API only sees entries of the page's own origin. So this keeps
 /// its own place in the history: a new entry moves it to the end, and a step
-/// back or forward (which only dalzzack's own commands take) moves it by one.
+/// back or forward taken by dalzzack's own commands moves it by one.
+///
+/// A page can also step through history itself (`history.back()`, a site's own
+/// back link), and that is not seen. Back therefore asks only for there to be
+/// another entry, so it never reads disabled when it would work, and at the
+/// oldest entry it does nothing when pressed. Forward follows the place and can
+/// read disabled after a page's own step back.
 #[derive(Clone)]
 struct Nav {
     /// Empty while the landing page shows.
@@ -87,7 +100,7 @@ impl Nav {
     }
 
     fn can_back(&self) -> bool {
-        self.pos > 0
+        self.len > 1
     }
 
     fn can_forward(&self) -> bool {
@@ -159,46 +172,58 @@ fn rect(frame: Frame) -> Rect {
     }
 }
 
-/// How much of the top of the window's content area its title bar covers.
+/// The title bar's height as last measured, in logical pixels. Readable from any
+/// thread; see [`measure_title_inset`].
+pub fn title_inset() -> f64 {
+    f64::from_bits(TITLE_INSET.load(Ordering::SeqCst))
+}
+
+/// How much of the top of the window's content area its title bar covers, asked
+/// of the window and remembered for [`title_inset`]. **Main thread only**: it
+/// reads `NSWindow` geometry, which AppKit allows only there. The window is
+/// built and resized on the main thread, which is where this runs.
 ///
 /// On macOS the content view reaches under the title bar, so a webview at the
 /// top of it has its first ~32 px hidden (WebKit pushes the page down by that
 /// much, which is why `--height` has always given a viewport that short there).
 /// The bar has to start below the title bar, and it has to be measured: the
-/// height differs between macOS versions.
+/// height differs between macOS versions. Windows and Linux start the content
+/// below the title bar, so it covers nothing there.
 #[cfg(target_os = "macos")]
-pub fn title_inset(window: &WebviewWindow) -> f64 {
+pub fn measure_title_inset(window: &WebviewWindow) -> f64 {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
     use objc2_foundation::NSRect;
 
     let Ok(ns_window) = window.ns_window() else {
-        return 0.0;
+        return title_inset();
     };
     let ns_window: *mut AnyObject = ns_window.cast();
     if ns_window.is_null() {
-        return 0.0;
+        return title_inset();
     }
-    // SAFETY: a live NSWindow, asked on the main thread (setup and window
-    // events both run there) for two plain geometry properties.
-    unsafe {
+    // SAFETY: a live NSWindow, asked on the main thread for two plain geometry
+    // properties, and the pointer is used before this function returns.
+    let inset = unsafe {
         let frame: NSRect = msg_send![ns_window, frame];
         let layout: NSRect = msg_send![ns_window, contentLayoutRect];
         (frame.size.height - layout.size.height).max(0.0)
-    }
+    };
+    TITLE_INSET.store(inset.to_bits(), Ordering::SeqCst);
+    inset
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn title_inset(_window: &WebviewWindow) -> f64 {
+pub fn measure_title_inset(_window: &WebviewWindow) -> f64 {
     0.0
 }
 
 /// How much taller the window is than the page it shows: the bar, and on macOS
 /// the title bar the bar must clear. Zero with `--no-toolbar`, which keeps the
 /// window exactly as it was.
-pub fn extra_height(window: &WebviewWindow) -> f64 {
+pub fn extra_height() -> f64 {
     if is_enabled() {
-        BAR_HEIGHT + title_inset(window)
+        BAR_HEIGHT + title_inset()
     } else {
         0.0
     }
@@ -231,6 +256,29 @@ pub fn install(
     page_height: f64,
     env: &BarEnv,
 ) -> tauri::Result<()> {
+    install_bar(window, instance_id, page_width, page_height, env).inspect_err(|_| {
+        // Half an install is a window with a dead strip and no bar. Put the
+        // page back where it was, and say there is no toolbar.
+        set_enabled(false);
+        let _ = window.set_size(LogicalSize::new(page_width, page_height));
+        let page: &Webview = window.as_ref();
+        let _ = page.set_auto_resize(true);
+        let _ = page.set_bounds(rect(Frame {
+            x: 0.0,
+            y: 0.0,
+            width: page_width,
+            height: page_height,
+        }));
+    })
+}
+
+fn install_bar(
+    window: &WebviewWindow,
+    instance_id: &str,
+    page_width: f64,
+    page_height: f64,
+    env: &BarEnv,
+) -> tauri::Result<()> {
     let _ = INSTANCE.set(instance_id.to_string());
 
     let page: &Webview = window.as_ref();
@@ -241,7 +289,7 @@ pub fn install(
     // size is set outright rather than adjusted: the size a window is built with
     // comes out a pixel taller than asked, and reading it back to add to it
     // would keep that pixel in the page.
-    let inset = title_inset(window);
+    let inset = measure_title_inset(window);
     let window_height = page_height + BAR_HEIGHT + inset;
     window.set_size(LogicalSize::new(page_width, window_height))?;
     window.set_min_size(Some(LogicalSize::new(400.0, 300.0 + BAR_HEIGHT + inset)))?;
@@ -297,7 +345,7 @@ pub fn install(
     });
 
     crate::activity::set_listener(on_activity);
-    spawn_watcher();
+    spawn_watcher(window.clone());
     tracing::info!(
         "[toolbar] installed: bar {BAR_HEIGHT} px, title inset {inset} px, bar {bar_frame:?}, page {page_frame:?}"
     );
@@ -310,7 +358,7 @@ fn content_frames(window: &WebviewWindow) -> tauri::Result<(Frame, Frame)> {
     Ok(split(
         size.width,
         size.height,
-        title_inset(window),
+        measure_title_inset(window),
         BAR_HEIGHT,
     ))
 }
@@ -333,8 +381,12 @@ fn relayout(window: &WebviewWindow) -> tauri::Result<()> {
 /// bar exists.
 fn push() {
     let Some(bar) = BAR.get() else { return };
+    // The number and the snapshot are taken together, so a higher number is
+    // always the newer state, whichever push the bar happens to receive first.
+    let _order = PUSH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let n = nav().clone();
     let state = json!({
+        "seq": PUSH_SEQ.fetch_add(1, Ordering::SeqCst) + 1,
         "id": INSTANCE.get(),
         "nav": {
             "url": n.url,
@@ -374,6 +426,9 @@ fn shown_address(url: &str) -> String {
 
 /// The page started or finished loading `url` (from the page's own load events).
 pub fn note_load(url: &Url, loading: bool) {
+    if BAR.get().is_none() {
+        return;
+    }
     {
         let mut n = nav();
         n.url = shown_address(url.as_str());
@@ -387,6 +442,9 @@ pub fn note_load(url: &Url, loading: bool) {
 
 /// `back` or `forward` took the page one step through history.
 pub fn note_history_step(back: bool) {
+    if BAR.get().is_none() {
+        return;
+    }
     nav().stepped(back);
     push();
 }
@@ -394,10 +452,13 @@ pub fn note_history_step(back: bool) {
 /// Where the page is now, and how many history entries there are. This reads
 /// `location` and `history.length` and touches nothing else, so the page can
 /// tell no more than it can from any other script evaluation.
-const PROBE: &str = "return JSON.stringify({u: location.href, n: history.length});";
+const PROBE: &str =
+    "return JSON.stringify({u: location.href, n: history.length, r: document.readyState});";
 
 fn schedule_probe() {
-    if PROBING.swap(true, Ordering::SeqCst) {
+    // With `--no-toolbar` nothing here runs: a bare window adds nothing to what
+    // the page can observe.
+    if BAR.get().is_none() || PROBING.swap(true, Ordering::SeqCst) {
         return;
     }
     tauri::async_runtime::spawn(async {
@@ -419,11 +480,17 @@ async fn probe() {
     };
     let url = shown_address(read["u"].as_str().unwrap_or_default());
     let len = read["n"].as_u64().unwrap_or(0) as usize;
+    // A document that is complete is not loading, however the load ended: wry
+    // reports a load's start and its success, and nothing when it fails.
+    let settled = read["r"].as_str() == Some("complete");
     let changed = {
         let mut n = nav();
-        let before = (n.url.clone(), n.can_back(), n.can_forward());
+        let before = (n.url.clone(), n.loading, n.can_back(), n.can_forward());
         n.observe(url, len);
-        before != (n.url.clone(), n.can_back(), n.can_forward())
+        if settled {
+            n.loading = false;
+        }
+        before != (n.url.clone(), n.loading, n.can_back(), n.can_forward())
     };
     if changed {
         push();
@@ -432,12 +499,15 @@ async fn probe() {
 
 /// A page can change its address without a load: `history.pushState`, a hash
 /// link, a single-page app's router. No event says so, so the bar asks now and
-/// then.
-fn spawn_watcher() {
-    tauri::async_runtime::spawn(async {
+/// then, but only while the window has focus: an agent's window that nobody is
+/// looking at is asked once per command and once per load, and no more.
+fn spawn_watcher(window: WebviewWindow) {
+    tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            probe_when_idle();
+            if window.is_focused().unwrap_or(false) {
+                probe_when_idle();
+            }
         }
     });
 }
@@ -483,6 +553,13 @@ fn bar_navigation(url: &Url) -> bool {
     false
 }
 
+/// `http`, `a+b.c`: the characters a URL scheme may have.
+fn is_scheme(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+}
+
 /// What a person typed in the address field, as an address to open.
 ///
 /// There is no search: text that is not an address is refused rather than
@@ -493,7 +570,8 @@ fn normalize_address(input: &str) -> Option<String> {
         return None;
     }
     let lower = text.to_ascii_lowercase();
-    if let Some((scheme, _)) = lower.split_once("://") {
+    // `example.com/login?next=https://example.com` has a `://` in it and no scheme.
+    if let Some((scheme, _)) = lower.split_once("://").filter(|(s, _)| is_scheme(s)) {
         return matches!(scheme, "http" | "https" | "file").then(|| text.to_string());
     }
     if lower == "about:blank" {
@@ -509,9 +587,11 @@ fn normalize_address(input: &str) -> Option<String> {
         return None;
     }
     let local = host == "localhost"
-        || host.starts_with("127.")
         || host.ends_with(".local")
-        || lower.starts_with('[');
+        || lower.starts_with('[')
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback() || ip.is_private());
     Some(format!(
         "{}://{}",
         if local { "http" } else { "https" },
@@ -645,10 +725,32 @@ mod tests {
         assert_eq!(n("data:text/html,hi"), None);
         assert_eq!(n("ftp://example.com"), None);
         assert_eq!(n("/just/a/path"), None);
+
+        // A `://` inside the address is not a scheme in front of it.
+        assert_eq!(
+            n("example.com/login?next=https://example.com/home").as_deref(),
+            Some("https://example.com/login?next=https://example.com/home")
+        );
+        assert_eq!(
+            n("web.archive.org/web/https://example.com").as_deref(),
+            Some("https://web.archive.org/web/https://example.com")
+        );
+        // Local means local: loopback and private addresses, not any name that
+        // merely starts with 127.
+        assert_eq!(
+            n("192.168.1.20:3000").as_deref(),
+            Some("http://192.168.1.20:3000")
+        );
+        assert_eq!(n("10.0.0.5").as_deref(), Some("http://10.0.0.5"));
+        assert_eq!(
+            n("127.attacker.example").as_deref(),
+            Some("https://127.attacker.example")
+        );
+        assert_eq!(n("8.8.8.8").as_deref(), Some("https://8.8.8.8"));
     }
 
     #[test]
-    fn back_and_forward_follow_the_place_in_history() {
+    fn back_needs_another_entry_and_forward_follows_the_place() {
         let mut n = Nav::new();
         assert!(!n.can_back() && !n.can_forward(), "nothing read yet");
 
@@ -662,15 +764,31 @@ mod tests {
         n.observe("https://a.test/".into(), 3);
         assert!(n.can_back() && n.can_forward(), "in the middle");
         n.stepped(true);
-        assert!(!n.can_back() && n.can_forward(), "at the oldest entry");
+        assert!(n.can_forward(), "at the oldest entry");
+        assert!(
+            n.can_back(),
+            "Back is never disabled while there is another entry"
+        );
 
         // Stepping past either end stays at the end.
+        n.stepped(false);
+        n.stepped(false);
+        n.stepped(false);
+        assert!(!n.can_forward());
+    }
+
+    #[test]
+    fn back_stays_enabled_when_a_new_page_replaces_the_forward_history() {
+        // landing, A; back; open B. The browser drops A, so the history is
+        // [landing, B] and its length did not change: nothing here can see that a
+        // new entry was made, and a model that kept its place would say there is
+        // nothing to go back to.
+        let mut n = Nav::new();
+        n.observe(String::new(), 1);
+        n.observe("https://a.test/".into(), 2);
         n.stepped(true);
-        assert!(!n.can_back());
-        n.stepped(false);
-        n.stepped(false);
-        n.stepped(false);
-        assert!(n.can_back() && !n.can_forward());
+        n.observe("https://b.test/".into(), 2);
+        assert!(n.can_back());
     }
 
     #[test]

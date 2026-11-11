@@ -56,8 +56,8 @@ pub async fn native_mouse_move(viewport_x: f64, viewport_y: f64) -> Result<(), S
 /// it cannot say. The real one is 32 on the macOS this was measured on, and the
 /// old fixed 28 put every native click and hover 4 px above its target.
 #[cfg(target_os = "macos")]
-fn measured_title_bar(window: &tauri::WebviewWindow) -> f64 {
-    let measured = crate::toolbar::title_inset(window);
+fn measured_title_bar() -> f64 {
+    let measured = crate::toolbar::title_inset();
     if measured > 1.0 {
         measured
     } else {
@@ -86,7 +86,7 @@ async fn native_mouse_move_macos(viewport_x: f64, viewport_y: f64) -> Result<(),
     let title_bar_logical = if title_bar_phys > 1.0 {
         title_bar_phys / scale
     } else {
-        measured_title_bar(&window)
+        measured_title_bar()
     };
 
     let screen_x = (outer_pos.x as f64 / scale) + viewport_x;
@@ -146,7 +146,7 @@ async fn native_mouse_click_macos(
         title_bar_phys / scale
     } else {
         // inner_position == outer_position (Tauri bug)
-        measured_title_bar(&window)
+        measured_title_bar()
     };
 
     let screen_x = (outer_pos.x as f64 / scale) + viewport_x;

@@ -1759,7 +1759,7 @@ async fn tool_resize_window(args: &Value) -> Result<Value> {
         // The size asked for is the page's; the toolbar is on top of it.
         .set_size(LogicalSize::new(
             width as f64,
-            height as f64 + crate::toolbar::extra_height(&window),
+            height as f64 + crate::toolbar::extra_height(),
         ))
         .map_err(|e| anyhow!("set_size failed: {}", e))?;
 
