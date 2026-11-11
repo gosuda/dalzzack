@@ -17,12 +17,13 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use tauri::webview::{PageLoadEvent, WebviewBuilder};
-use tauri::WindowEvent;
-use tauri::{LogicalPosition, LogicalSize, Rect, Url, Webview, WebviewUrl, WebviewWindow};
+use tauri::{
+    LogicalPosition, LogicalSize, Rect, Url, Webview, WebviewUrl, WebviewWindow, WindowEvent,
+};
 
 /// Height of the bar in logical pixels: a 36 px row for history, reload and the
 /// address, and a 28 px row for what the window is doing.
-pub const BAR_HEIGHT: f64 = 64.0;
+const BAR_HEIGHT: f64 = 64.0;
 
 /// Where the bar's links and its address form point. Never resolvable
 /// (`.invalid` is reserved), and always cancelled before it leaves the bar.
@@ -121,18 +122,18 @@ pub fn height() -> f64 {
 
 /// A rectangle in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Frame {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
+struct Frame {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 }
 
 /// Split a window's content area into the bar (full width, below `top`) and the
 /// page (everything under the bar). `top` is what the window's own title bar
 /// covers of the content area: nothing on Windows and Linux, where the content
 /// area starts below it, and about 32 px on macOS, where it does not.
-pub fn split(width: f64, height: f64, top: f64, bar: f64) -> (Frame, Frame) {
+fn split(width: f64, height: f64, top: f64, bar: f64) -> (Frame, Frame) {
     let top = top.clamp(0.0, height.max(0.0));
     let bar = bar.clamp(0.0, (height - top).max(0.0));
     (
@@ -330,7 +331,7 @@ fn relayout(window: &WebviewWindow) -> tauri::Result<()> {
 
 /// Send the bar everything it shows. Safe from any thread, and a no-op until the
 /// bar exists.
-pub fn push() {
+fn push() {
     let Some(bar) = BAR.get() else { return };
     let n = nav().clone();
     let state = json!({
@@ -350,6 +351,11 @@ pub fn push() {
 fn on_activity() {
     push();
     // A command that just ended may have moved the page.
+    probe_when_idle();
+}
+
+/// Ask where the page is, unless a command is running: its end asks.
+fn probe_when_idle() {
     if crate::activity::snapshot()["state"] != "running" {
         schedule_probe();
     }
@@ -425,14 +431,12 @@ async fn probe() {
 
 /// A page can change its address without a load: `history.pushState`, a hash
 /// link, a single-page app's router. No event says so, so the bar asks now and
-/// then, but never while a command is running (the command's end asks).
+/// then.
 fn spawn_watcher() {
     tauri::async_runtime::spawn(async {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            if crate::activity::snapshot()["state"] != "running" {
-                schedule_probe();
-            }
+            probe_when_idle();
         }
     });
 }
@@ -442,7 +446,7 @@ fn spawn_watcher() {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, PartialEq)]
-pub enum Action {
+enum Action {
     Back,
     Forward,
     Reload,
@@ -450,7 +454,7 @@ pub enum Action {
 }
 
 /// The action a link or the address form in the bar asked for.
-pub fn parse_action(url: &Url) -> Option<Action> {
+fn parse_action(url: &Url) -> Option<Action> {
     match url.path() {
         "/back" => Some(Action::Back),
         "/forward" => Some(Action::Forward),
@@ -482,7 +486,7 @@ fn bar_navigation(url: &Url) -> bool {
 ///
 /// There is no search: text that is not an address is refused rather than
 /// guessed at. `javascript:` and its kin never become an address.
-pub fn normalize_address(input: &str) -> Option<String> {
+fn normalize_address(input: &str) -> Option<String> {
     let text = input.trim();
     if text.is_empty() || text.contains(char::is_whitespace) {
         return None;
