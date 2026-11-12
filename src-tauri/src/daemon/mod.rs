@@ -11,7 +11,7 @@ mod server;
 
 pub use client::{
     kill_daemon, list_instances, list_instances_json, live_instance_ids, ping_info, send_command,
-    stop_daemon,
+    send_labeled, stop_daemon,
 };
 pub use server::{parse_ttl, run_daemon, start_daemon, DaemonOptions};
 // For engines that run their own startup (Chrome) but serve the same protocol.
@@ -148,6 +148,11 @@ pub(crate) fn unverified_hint(pid: u32) -> String {
 pub struct DaemonRequest {
     pub tool: String,
     pub args: serde_json::Value,
+    /// The command line as the window's toolbar shows it, values already masked
+    /// by the CLI (`cli::command_label`). Absent from an older CLI, and then the
+    /// toolbar shows the tool name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
 }
 
 /// JSON protocol: response sent over socket
@@ -239,12 +244,26 @@ mod tests {
         let req = DaemonRequest {
             tool: "navigate".to_string(),
             args: serde_json::json!({"url": "https://example.com"}),
+            display: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("display"), "an absent label is not sent");
         let deserialized: DaemonRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.tool, "navigate");
         assert_eq!(deserialized.args["url"], "https://example.com");
+        assert_eq!(deserialized.display, None);
+    }
+
+    #[test]
+    fn a_request_from_an_older_cli_has_no_label() {
+        let old = r##"{"tool":"click","args":{"selector":"#a"}}"##;
+        let req: DaemonRequest = serde_json::from_str(old).unwrap();
+        assert_eq!(req.display, None);
+
+        let new = r##"{"tool":"click","args":{},"display":"click --selector #a"}"##;
+        let req: DaemonRequest = serde_json::from_str(new).unwrap();
+        assert_eq!(req.display.as_deref(), Some("click --selector #a"));
     }
 
     #[test]

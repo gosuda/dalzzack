@@ -555,8 +555,8 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "site": site_param(),
-                    "width": { "type": "integer", "description": "New window width in pixels (>= 100)." },
-                    "height": { "type": "integer", "description": "New window height in pixels (>= 100)." }
+                    "width": { "type": "integer", "description": "New PAGE width in pixels (>= 100); the window is taller by its toolbar." },
+                    "height": { "type": "integer", "description": "New PAGE height in pixels (>= 100); the window is taller by its toolbar." }
                 },
                 "required": ["width", "height"]
             }),
@@ -1208,6 +1208,12 @@ async fn tool_history(_args: &Value, dir: &str) -> Result<Value> {
         elapsed_ms += POLL_INTERVAL_MS;
     }
 
+    let changed = !before.is_empty() && before != after_url;
+    if changed {
+        // The toolbar keeps its own place in the history: no page can say.
+        crate::toolbar::note_history_step(dir == "back");
+    }
+
     Ok(serde_json::json!({
         "status": "completed",
         "direction": dir,
@@ -1216,7 +1222,7 @@ async fn tool_history(_args: &Value, dir: &str) -> Result<Value> {
         "title": last["title"],
         "ready_state": last["ready"],
         "elapsed_ms": elapsed_ms,
-        "changed": !before.is_empty() && before != after_url,
+        "changed": changed,
     }))
 }
 
@@ -1728,8 +1734,7 @@ pub(crate) async fn tool_get_response_headers(args: &Value) -> Result<Value> {
 
 /// resize_window — resize the WebView window.
 async fn tool_resize_window(args: &Value) -> Result<Value> {
-    use crate::APP_HANDLE;
-    use tauri::{LogicalSize, Manager};
+    use tauri::LogicalSize;
 
     let width = args["width"]
         .as_u64()
@@ -1746,16 +1751,16 @@ async fn tool_resize_window(args: &Value) -> Result<Value> {
         }));
     }
 
-    let app_handle = APP_HANDLE.read().await;
-    let app = app_handle
-        .as_ref()
-        .ok_or_else(|| anyhow!("AppHandle not available"))?;
-    let window = app
-        .get_webview_window("main")
+    let window = crate::state::get_main_window()
+        .await
         .ok_or_else(|| anyhow!("Main window not found"))?;
 
     window
-        .set_size(LogicalSize::new(width as f64, height as f64))
+        // The size asked for is the page's; the toolbar is on top of it.
+        .set_size(LogicalSize::new(
+            width as f64,
+            height as f64 + crate::toolbar::extra_height(),
+        ))
         .map_err(|e| anyhow!("set_size failed: {}", e))?;
 
     tracing::info!("[resize_window] Resized to {}x{}", width, height);
@@ -2843,8 +2848,32 @@ async fn capture_page(
     }
     #[cfg(not(target_os = "windows"))]
     {
-        capture_with_xcap(file_path, crop_rect).await
+        // The window pixels include the title bar and the toolbar, so without
+        // a selector the whole page is the crop: Windows and Chrome capture the
+        // page alone, and the picture should not depend on the platform.
+        let page_only = match crop_rect {
+            Some(rect) => Some(rect.clone()),
+            None => viewport_rect().await,
+        };
+        capture_with_xcap(file_path, &page_only).await
     }
+}
+
+/// The whole viewport as a crop rect, in CSS pixels. `None` when the page will
+/// not say, and then the capture keeps the window as it is.
+#[cfg(not(target_os = "windows"))]
+async fn viewport_rect() -> Option<Value> {
+    let answer = webview_execute_js(
+        "return JSON.stringify({vw: window.innerWidth, vh: window.innerHeight});",
+        Some(2000),
+    )
+    .await
+    .ok()?;
+    let size: Value = serde_json::from_str(answer.as_str()?).ok()?;
+    let (vw, vh) = (size["vw"].as_f64()?, size["vh"].as_f64()?);
+    (vw > 0.0 && vh > 0.0).then(
+        || serde_json::json!({ "x": 0, "y": 0, "width": vw, "height": vh, "vw": vw, "vh": vh }),
+    )
 }
 
 /// Windows: take a screenshot via the WebView2 CapturePreview API.
@@ -2853,9 +2882,7 @@ async fn capture_webview_screenshot(
     file_path: &std::path::Path,
     crop_rect: &Option<Value>,
 ) -> Result<(), String> {
-    use crate::APP_HANDLE;
     use std::sync::mpsc;
-    use tauri::Manager;
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         ICoreWebView2, ICoreWebView2CapturePreviewCompletedHandler,
         ICoreWebView2CapturePreviewCompletedHandler_Impl,
@@ -2869,11 +2896,8 @@ async fn capture_webview_screenshot(
     let file_path = file_path.to_path_buf();
     let crop_rect = crop_rect.clone();
 
-    // Get the WebviewWindow from the AppHandle
-    let app_handle = APP_HANDLE.read().await;
-    let app = app_handle.as_ref().ok_or("AppHandle not available")?;
-    let window = app
-        .get_webview_window("main")
+    let window = crate::state::get_main_window()
+        .await
         .ok_or("Main window not found")?;
 
     // Receive the result through a channel

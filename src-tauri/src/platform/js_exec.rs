@@ -98,6 +98,23 @@ pub async fn webview_execute_js(
     script: &str,
     timeout_ms: Option<u32>,
 ) -> Result<serde_json::Value, String> {
+    webview_execute_js_logged(script, timeout_ms, true).await
+}
+
+/// [`webview_execute_js`] that leaves no line in the log. For what runs on a
+/// timer, which would otherwise write thousands of lines an hour.
+pub async fn webview_execute_js_quiet(
+    script: &str,
+    timeout_ms: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    webview_execute_js_logged(script, timeout_ms, false).await
+}
+
+async fn webview_execute_js_logged(
+    script: &str,
+    timeout_ms: Option<u32>,
+    log: bool,
+) -> Result<serde_json::Value, String> {
     // Real Chrome: same wrapper and decoding, delivered by Runtime.evaluate.
     // Every JS-based tool reaches Chrome through here.
     if crate::engine::is_chrome() {
@@ -110,12 +127,14 @@ pub async fn webview_execute_js(
     let timeout = timeout_ms.unwrap_or(30000);
     let execution_id = next_execution_id();
 
-    tracing::info!(
-        "execute_js: id={}, timeout={}ms, script_len={}",
-        execution_id,
-        timeout,
-        script.len()
-    );
+    if log {
+        tracing::info!(
+            "execute_js: id={}, timeout={}ms, script_len={}",
+            execution_id,
+            timeout,
+            script.len()
+        );
+    }
 
     let wrapped_script = wrap_script(script);
 

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, WebviewWindow};
 use tokio::sync::RwLock;
 
 use crate::webview::ExecutionContextStore;
@@ -89,10 +89,21 @@ pub async fn get_app_handle() -> Option<AppHandle> {
     handle.clone()
 }
 
+/// The window that holds the page, kept from the moment it was built.
+///
+/// It is stored instead of looked up by label because a window with a second
+/// webview (the toolbar) is no longer a "webview window" to Tauri:
+/// `get_webview_window` answers `None` for it, though the page is right there.
+static PAGE_WINDOW: std::sync::OnceLock<WebviewWindow> = std::sync::OnceLock::new();
+
+/// Remember the window that holds the page. Called once, when it is built.
+pub fn set_main_window(window: WebviewWindow) {
+    let _ = PAGE_WINDOW.set(window);
+}
+
 /// Get the main WebView window
 pub async fn get_main_window() -> Option<WebviewWindow> {
-    let handle = get_app_handle().await?;
-    handle.get_webview_window("main")
+    PAGE_WINDOW.get().cloned()
 }
 
 /// Poll for the main WebView window until it exists or `budget` elapses.

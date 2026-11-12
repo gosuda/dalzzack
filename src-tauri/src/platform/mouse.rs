@@ -52,6 +52,19 @@ pub async fn native_mouse_move(viewport_x: f64, viewport_y: f64) -> Result<(), S
     }
 }
 
+/// The title bar's height in logical pixels, asked of the window; 28 only when
+/// it cannot say. The real one is 32 on the macOS this was measured on, and the
+/// old fixed 28 put every native click and hover 4 px above its target.
+#[cfg(target_os = "macos")]
+fn measured_title_bar() -> f64 {
+    let measured = crate::toolbar::title_inset();
+    if measured > 1.0 {
+        measured
+    } else {
+        28.0
+    }
+}
+
 #[cfg(target_os = "macos")]
 async fn native_mouse_move_macos(viewport_x: f64, viewport_y: f64) -> Result<(), String> {
     use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
@@ -73,11 +86,14 @@ async fn native_mouse_move_macos(viewport_x: f64, viewport_y: f64) -> Result<(),
     let title_bar_logical = if title_bar_phys > 1.0 {
         title_bar_phys / scale
     } else {
-        28.0
+        measured_title_bar()
     };
 
     let screen_x = (outer_pos.x as f64 / scale) + viewport_x;
-    let screen_y = (outer_pos.y as f64 / scale) + title_bar_logical + viewport_y;
+    // The page starts below the toolbar, which is `toolbar::height()` tall (0 with
+    // `--no-toolbar`); the viewport coordinates count from the page.
+    let screen_y =
+        (outer_pos.y as f64 / scale) + title_bar_logical + crate::toolbar::height() + viewport_y;
 
     tokio::task::spawn_blocking(move || {
         use core_graphics::event::CGEventTapLocation;
@@ -130,12 +146,14 @@ async fn native_mouse_click_macos(
         title_bar_phys / scale
     } else {
         // inner_position == outer_position (Tauri bug)
-        // Use the default macOS title bar height
-        28.0
+        measured_title_bar()
     };
 
     let screen_x = (outer_pos.x as f64 / scale) + viewport_x;
-    let screen_y = (outer_pos.y as f64 / scale) + title_bar_logical + viewport_y;
+    // The page starts below the toolbar, which is `toolbar::height()` tall (0 with
+    // `--no-toolbar`); the viewport coordinates count from the page.
+    let screen_y =
+        (outer_pos.y as f64 / scale) + title_bar_logical + crate::toolbar::height() + viewport_y;
 
     tracing::info!(
         "[NativeClick] viewport({}, {}) → screen({:.0}, {:.0}), scale={}, outer=({}, {}), inner=({}, {}), titlebar={:.0}px",
@@ -273,7 +291,8 @@ async fn native_mouse_click_windows(
         .map_err(|e| format!("inner_pos: {}", e))?;
 
     let screen_x = inner_pos.x as f64 + (viewport_x * scale);
-    let screen_y = inner_pos.y as f64 + (viewport_y * scale);
+    // The page starts below the toolbar (0 px tall with `--no-toolbar`).
+    let screen_y = inner_pos.y as f64 + ((viewport_y + crate::toolbar::height()) * scale);
 
     let click_type_owned = click_type.to_string();
 

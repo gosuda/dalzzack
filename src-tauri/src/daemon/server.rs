@@ -45,6 +45,8 @@ pub struct DaemonOptions {
     /// anything policy-related: nothing is ever blocked, so nothing is ever
     /// reported. Turn this on when the question *is* the policy.
     pub enforce_csp: bool,
+    /// Open a bare window: no strip above the page.
+    pub no_toolbar: bool,
     /// Give this daemon its own WebView2 profile — empty at start, deleted by
     /// `stop` — so its cookies, storage and `reset` never touch any other daemon.
     pub private_profile: bool,
@@ -335,6 +337,7 @@ pub fn start_daemon(
         user_agent,
         raw_user_agent,
         enforce_csp,
+        no_toolbar,
         private_profile,
         engine,
         engine_given,
@@ -421,6 +424,14 @@ pub fn start_daemon(
                     .unwrap_or(true);
                 if enforce_csp && live_csp_bypassed {
                     ignored.push("--enforce-csp");
+                }
+                // Daemons from before the toolbar report nothing, and have none.
+                let live_toolbar = info
+                    .get("toolbar")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if no_toolbar && live_toolbar {
+                    ignored.push("--no-toolbar");
                 }
                 if width.is_some() || height.is_some() {
                     ignored.push("--width/--height");
@@ -565,6 +576,9 @@ pub fn start_daemon(
     }
     if enforce_csp {
         args.push("--enforce-csp".to_string());
+    }
+    if no_toolbar {
+        args.push("--no-toolbar".to_string());
     }
     if private_profile {
         args.push("--private-profile".to_string());
@@ -775,6 +789,7 @@ pub fn run_daemon(instance_id: String, opts: DaemonOptions) {
         user_agent,
         raw_user_agent,
         enforce_csp,
+        no_toolbar,
         private_profile,
         engine: _,
         engine_given: _,
@@ -982,6 +997,7 @@ pub fn run_daemon(instance_id: String, opts: DaemonOptions) {
         console_fallback: console_fallback_wanted(no_console_capture, console_capture),
         ua_full_version: ua.full_version,
         data_directory,
+        no_toolbar,
     });
 }
 
@@ -1271,6 +1287,7 @@ async fn handle_connection(
                 // it is the difference between "no violations" and "no
                 // enforcement".
                 "csp_bypassed": crate::state::csp_bypassed(),
+                "toolbar": crate::toolbar::is_enabled() && !crate::engine::is_chrome(),
                 // `start --trust-cert`: what this WKWebView trusts on top of
                 // the system roots, so a test report can name it.
                 "trusted_certs": crate::trust_cert::report(),
@@ -1300,7 +1317,16 @@ async fn handle_connection(
         }
     }
 
-    let result = crate::tools::definitions::execute_tool(&request.tool, &args).await;
+    // The window's toolbar shows the CLI's masked label, never the arguments.
+    let label = request
+        .display
+        .clone()
+        .unwrap_or_else(|| request.tool.clone());
+    let result = crate::activity::track(
+        label,
+        crate::tools::definitions::execute_tool(&request.tool, &args),
+    )
+    .await;
 
     let response = match result {
         Ok(output) => DaemonResponse {

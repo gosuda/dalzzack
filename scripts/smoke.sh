@@ -40,7 +40,13 @@ step "start daemon (id=$ID)"
 # observe, so capture is opt-in and off by default. The
 # smoke test exercises console_logs, so it has to ask for it. On Windows the
 # flag is accepted and ignored — CDP capture is always on there.
-START_OUT=$(dalzzack start --id "$ID" --console-capture)
+#
+# The page size fits a small screen. macOS keeps a window inside the screen's
+# visible area, and the CI runner's screen is too short for the default 1200x800
+# page plus the toolbar and the title bar: the page came out 1200x581 there.
+PAGE_W=960
+PAGE_H=480
+START_OUT=$(dalzzack start --id "$ID" --console-capture --width "$PAGE_W" --height "$PAGE_H")
 echo "$START_OUT"
 echo "$START_OUT" | python3 -c '
 import json, sys
@@ -63,6 +69,29 @@ if [ "$TITLE" != "Example Domain" ]; then
   echo "FAIL: expected title 'Example Domain', got '$TITLE'" >&2
   exit 1
 fi
+
+step "the toolbar leaves the page the size it was asked to be"
+# The window has a strip above the page (history, address, running command). The
+# page must still be the size `start` asked for, and a screenshot must be the
+# page alone: no title bar, no strip.
+SIZE=$(dalzzack exec-js -i "$ID" --script 'return innerWidth + "x" + innerHeight' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("result",""))')
+if [ "$SIZE" != "${PAGE_W}x${PAGE_H}" ]; then
+  echo "FAIL: expected a ${PAGE_W}x${PAGE_H} page under the toolbar, got $SIZE" >&2
+  exit 1
+fi
+dalzzack screenshot -i "$ID" --output "$WORKDIR/size.png" >/dev/null
+python3 - "$WORKDIR/size.png" "$PAGE_W" "$PAGE_H" <<'PY'
+import struct, sys
+with open(sys.argv[1], "rb") as f:
+    head = f.read(24)
+page_w, page_h = int(sys.argv[2]), int(sys.argv[3])
+w, h = struct.unpack(">II", head[16:24])
+scale = w / page_w
+if abs(h - page_h * scale) > 1:
+    raise SystemExit(f"FAIL: screenshot is {w}x{h}; a {page_w}x{page_h} page at {scale}x is {w}x{page_h * scale:.0f}")
+print(f"screenshot {w}x{h} = the page alone at {scale}x")
+PY
 
 step "describe"
 DESC=$(dalzzack describe -i "$ID" --output "$WORKDIR/describe.png")

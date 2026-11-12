@@ -3,6 +3,8 @@
 //! Provides browser automation via Tauri WebView with platform-specific native APIs.
 //! CLI daemon controls the WebView for navigation, JS execution, HTML capture, etc.
 
+/// Which commands a window is running, for its toolbar.
+pub mod activity;
 pub mod app;
 /// Shared CDP transport. Windows-only: WebView2 is the only backend that
 /// exposes a DevTools Protocol channel.
@@ -46,6 +48,8 @@ pub mod response_headers;
 pub mod site_data;
 pub mod state;
 pub mod sw_console;
+/// The strip above the page: history, address, and the running command.
+pub mod toolbar;
 pub mod tools;
 /// `start --trust-cert`: extra trust anchors for one WKWebView instance.
 pub mod trust_cert;

@@ -10,6 +10,11 @@ use std::path::Path;
 pub struct Step {
     pub tool: String,
     pub args: Option<serde_json::Value>,
+    /// The step as the window's toolbar shows it (`cli::command_label`). A step
+    /// read from a file's `{"tool", "args"}` form has none, and then the toolbar
+    /// shows the tool name.
+    #[serde(default)]
+    pub display: Option<String>,
 }
 
 /// Steps file format
@@ -130,7 +135,12 @@ pub fn run_steps(instance_id: &str, steps: Vec<Step>) {
                 // The tool name only: step arguments can hold form values.
                 tracing::info!("[Step {}/{}] {}", i + 1, steps.len(), step.tool);
 
-                let result = crate::tools::definitions::execute_tool(&step.tool, &args).await;
+                let label = step.display.clone().unwrap_or_else(|| step.tool.clone());
+                let result = crate::activity::track(
+                    label,
+                    crate::tools::definitions::execute_tool(&step.tool, &args),
+                )
+                .await;
                 let (step_result, step_failed) = step_report(i + 1, &step.tool, result);
                 println!(
                     "{}",

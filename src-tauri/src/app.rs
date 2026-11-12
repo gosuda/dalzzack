@@ -407,6 +407,8 @@ pub struct AppOptions {
     /// shares. Must be `Some` whenever `browser_args` is non-empty (see the
     /// note above `run_with_instance_id`).
     pub data_directory: Option<std::path::PathBuf>,
+    /// `start --no-toolbar`: a bare window with only the page in it.
+    pub no_toolbar: bool,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -474,7 +476,11 @@ pub fn run_with_instance_id(opts: AppOptions) {
         console_fallback,
         ua_full_version,
         data_directory,
+        no_toolbar,
     } = opts;
+
+    // The window's height depends on this, so it is settled before the window.
+    crate::toolbar::set_enabled(!no_toolbar);
 
     // Build the document-start script now: it has to be registered before the
     // first document, so every decision it depends on is already made.
@@ -512,8 +518,11 @@ pub fn run_with_instance_id(opts: AppOptions) {
 
     let instance_id_clone = instance_id.clone();
 
+    // `--width`/`--height` are the PAGE's size, as `resize` documents them. The
+    // toolbar sits on top of the page, so the window is taller by its height.
+    let bar_height = crate::toolbar::height();
     let win_width = width.unwrap_or(1200) as f64;
-    let win_height = height.unwrap_or(800) as f64;
+    let win_height = height.unwrap_or(800) as f64 + bar_height;
 
     // Inline landing page as a data: URL so the daemon always shows something
     // on start, regardless of whether the Tauri asset bundle is reachable from
@@ -545,11 +554,14 @@ pub fn run_with_instance_id(opts: AppOptions) {
             // Chromium flags (`--enable-heap-profiling`, `--js-flags=…`, …).
             // WebView2 only reads these at environment creation, so there is no
             // way to set them after the fact — they have to come from `start`.
+            #[allow(unused_mut)]
+            let mut bar_env = crate::toolbar::BarEnv::default();
             #[cfg(target_os = "windows")]
             if !browser_args.is_empty() {
                 let joined = format!("{} {}", WRY_DEFAULT_BROWSER_ARGS, browser_args.join(" "));
                 tracing::info!("Additional WebView2 browser args: {}", joined);
                 builder = builder.additional_browser_args(&joined);
+                bar_env.browser_args = Some(joined);
             }
             // A private folder for `--private-profile`, and always for
             // `--browser-arg` — see the note above `run_with_instance_id` for
@@ -557,6 +569,7 @@ pub fn run_with_instance_id(opts: AppOptions) {
             #[cfg(target_os = "windows")]
             if let Some(dir) = data_directory.clone() {
                 tracing::info!("WebView2 user data folder: {}", dir.display());
+                bar_env.data_directory = Some(dir.clone());
                 builder = builder.data_directory(dir);
             }
             #[cfg(not(target_os = "windows"))]
@@ -573,12 +586,22 @@ pub fn run_with_instance_id(opts: AppOptions) {
             let window = builder
                 .title(&window_title)
                 .inner_size(win_width, win_height)
-                .min_inner_size(400.0, 300.0)
+                .min_inner_size(400.0, 300.0 + bar_height)
                 .resizable(true)
                 .center()
-                .visible(true)
+                // With a toolbar the window is resized once, when it exists and
+                // its title bar can be measured; it is shown after that.
+                .visible(!crate::toolbar::is_enabled())
                 .focused(true)
                 .initialization_script(&init_script)
+                // The toolbar's address follows the page's own load events.
+                .on_page_load(|_, payload| {
+                    use tauri::webview::PageLoadEvent;
+                    crate::toolbar::note_load(
+                        payload.url(),
+                        matches!(payload.event(), PageLoadEvent::Started),
+                    );
+                })
                 // Enable F12 / right-click "Inspect" / attach-devtools. Effective
                 // only when the `tauri/devtools` feature is on (see Cargo.toml —
                 // enabled by default), otherwise a harmless no-op.
@@ -588,6 +611,23 @@ pub fn run_with_instance_id(opts: AppOptions) {
                     tracing::error!("!!! Failed to create main window: {} !!!", e);
                     panic!("Failed to create main window: {}", e);
                 });
+            // Read on the main thread, for the native mouse code that cannot, and
+            // before a tool task can find the window.
+            crate::toolbar::measure_title_inset(&window);
+            crate::state::set_main_window(window.clone());
+
+            if crate::toolbar::is_enabled() {
+                let id = instance_id_clone.as_deref().unwrap_or("default");
+                if let Err(e) = crate::toolbar::install(
+                    &window,
+                    id,
+                    win_width,
+                    win_height - bar_height,
+                    &bar_env,
+                ) {
+                    tracing::error!("[toolbar] could not be installed: {e}");
+                }
+            }
 
             // When the user closes the window, shut the whole daemon down.
             // Otherwise the TCP server keeps running with no WebView attached,
