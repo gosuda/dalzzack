@@ -1,6 +1,6 @@
 [package]
 name = "dalzzack"
-version = "1.3.0"
+version = "1.4.0"
 description = "Browser automation CLI for AI agents — screenshot-first, token-efficient."
 authors = ["dalzzack contributors"]
 edition = "2021"
