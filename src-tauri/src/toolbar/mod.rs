@@ -305,8 +305,12 @@ fn install_bar(
     page.set_auto_resize(false)?;
     page.set_bounds(rect(page_frame))?;
 
+    // A webview is built focused by default, and WebView2 and WebKit then move
+    // the keyboard focus into it: the page would start with
+    // `document.hasFocus()` false and keystrokes would go to the bar.
     #[allow(unused_mut)]
     let mut builder = WebviewBuilder::new("bar", WebviewUrl::External(bar_url()))
+        .focused(false)
         .devtools(false)
         .on_navigation(bar_navigation)
         .on_page_load(|_, payload| {
