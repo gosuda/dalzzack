@@ -62,6 +62,8 @@ pub mod uninstall;
 pub mod upgrade;
 /// The size of the page a window shows, as the window has it.
 pub mod viewport;
+/// The navigation log on WKWebView: delegate callbacks as CDP-shaped events.
+pub mod webkit_nav;
 pub mod webview;
 
 // Re-export public API for backward compatibility

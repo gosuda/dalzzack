@@ -42,3 +42,17 @@ dalzzack dump-recording -i b --output /tmp/tape.json            # daemon-memory 
 - `debugger-arm --id ID [--strategy first-script|exceptions|url] [--url-pattern REGEX]` / `debugger-snapshot --id ID [--clear]` / `debugger-disarm --id ID` — Windows-only: pre-arm V8 so `Debugger.paused` events fire, daemon buffers call frames and auto-resumes. Use when "what JS is running at startup?" matters.
 - `debugger-snapshot` resolves each frame's `scriptId` to a URL by joining against buffered `Debugger.scriptParsed` — call frames carry a scriptId and an *empty* `url` for eval'd, bundled and inline scripts, which is exactly the code worth identifying. Each frame gets `url`, `url_source` (`call_frame` | `script_parsed` | `unknown`), `pageLineNumber` (inline scripts offset by the script's `startLine`) and `script_origin_stack` (who called `eval`). The `scripts[]` table lists the referenced scripts; `scripts_unresolved` counts ids we never saw parsed.
 - `debugger-arm --strategy exceptions [--uncaught-only] [--max-frames N] [--sample-every N]` — pause on **every throw** (`Debugger.setPauseOnExceptions`). This is the only way to see engine-thrown errors: Proxy-invariant `TypeError`s, `Illegal invocation`, and friends never pass through the page's global `Error`/`TypeError` constructors, so wrapping those in-page always reports zero. Every throw pausing V8 is slow by construction — on a storm use `--sample-every N` (record every Nth) and `--max-frames N`. `debugger-snapshot` reports `seen_total` vs `dropped_by_sampling` so the sampled count is never mistaken for the real one, and it reads daemon memory, so it answers on a wedged renderer.
+
+### What works where
+
+| | macOS default | Windows (WebView2) | `--engine chrome` |
+|---|---|---|---|
+| `nav-log`, `navigate`'s `document` | navigations only; a redirect hop has no `status` | every request | every request |
+| `failed-requests` | main-frame loads only | every resource type | every resource type |
+| `response-headers` | not available | yes | yes |
+| `console-logs` | off unless `start --console-capture` (the page can see the hook) | yes | yes |
+| `exec-js --frame` / `--world`, `sw-console` | not available | yes | yes |
+| `debugger-*` | not available (use `attach-devtools`) | yes | not available |
+| `pause`, `trace`, `heap-snapshot` | degraded or native-only | full | not available |
+
+An unavailable command answers with a code naming the engine (`UNSUPPORTED_PLATFORM`, `UNSUPPORTED_ON_ENGINE`), never an empty result. When a diagnostic is missing on macOS, `--engine chrome` has it.

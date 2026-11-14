@@ -234,7 +234,8 @@ pub fn webkit_capture() -> bool {
 
 /// What sees a failed main-frame load on this daemon, for `__ping`.
 pub fn capture_word() -> &'static str {
-    if crate::netlog::is_armed() {
+    // Only a log that sees every request answers for failed loads by itself.
+    if crate::netlog::has_subresources() {
         "netlog"
     } else if webkit_capture() {
         "webkit_delegate"

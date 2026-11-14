@@ -337,6 +337,8 @@ pub fn list_instances_json() -> serde_json::Value {
                         // from daemon memory, not from the page, so a wedged
                         // renderer still answers. Null on pre-0.18 daemons.
                         "current_url": get("current_url"),
+                        // What feeds `nav-log`: cdp, webkit_navigations (macOS), or unavailable.
+                        "nav_log": get("nav_log"),
                         "last_used_ms": last_used_ms,
                         "last_used": ago(last_used_ms),
                         "last_tool": get("last_tool"),

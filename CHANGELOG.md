@@ -20,6 +20,14 @@ All notable changes to dalzzack. The format loosely follows
   work. This is viewport size only: no touch, pixel-ratio or user-agent emulation.
 - A usage error on stdout carries clap's "did you mean" tip, and `--script`,
   `--code` and `--js` are accepted by every command that takes JavaScript.
+- `nav-log` works on macOS. The WKWebView navigation delegate now feeds the log,
+  so macOS shows the redirect chain (each hop's `location`), the final response's
+  status and headers, a bot challenge (`cf-mitigated`), a self-solving challenge as
+  its second navigation, iframe navigations, and failed loads, with no page
+  JavaScript involved. WebKit does not report a redirect's own status, so a hop
+  shows its `location` and no `status`, and subresource requests are not in the log
+  (`source`, `coverage` and `limits` say so). `navigate` gains its `document` chain
+  and `challenge` on macOS, and `list` reports `nav_log` and a live `current_url`.
 
 ### Changed
 

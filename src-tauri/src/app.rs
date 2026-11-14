@@ -600,10 +600,16 @@ pub fn run_with_instance_id(opts: AppOptions) {
                 // The toolbar's address follows the page's own load events.
                 .on_page_load(|_, payload| {
                     use tauri::webview::PageLoadEvent;
-                    crate::toolbar::note_load(
-                        payload.url(),
-                        matches!(payload.event(), PageLoadEvent::Started),
-                    );
+                    let started = matches!(payload.event(), PageLoadEvent::Started);
+                    crate::toolbar::note_load(payload.url(), started);
+                    // On macOS the page's own load events close the navigation log's
+                    // entries: a commit, and a finish.
+                    #[cfg(target_os = "macos")]
+                    if started {
+                        crate::platform::wk_nav::page_committed(payload.url().as_str());
+                    } else {
+                        crate::platform::wk_nav::page_finished();
+                    }
                 })
                 // Enable F12 / right-click "Inspect" / attach-devtools. Effective
                 // only when the `tauri/devtools` feature is on (see Cargo.toml —

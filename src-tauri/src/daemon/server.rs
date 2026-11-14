@@ -1323,6 +1323,9 @@ async fn handle_connection(
                 // What sees a main-frame load that failed: the CDP network
                 // stream, the WKWebView delegate, or nothing.
                 "load_failure_capture": crate::main_frame::capture_word(),
+                // What feeds `nav-log`: `cdp` (every request), `webkit_navigations`
+                // (macOS: navigations only), or `unavailable`.
+                "nav_log": crate::netlog::transport().as_str(),
             }),
         };
         let resp_str = serde_json::to_string(&resp)?;

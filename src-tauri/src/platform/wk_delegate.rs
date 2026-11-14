@@ -139,6 +139,8 @@ pub fn install(webview: &tauri::WebviewWindow) -> Result<(), String> {
                 );
             }
 
+            super::wk_nav::install(class, webview);
+
             // WebKit reads which methods a delegate has when it is set.
             let _: () =
                 msg_send![webview, setNavigationDelegate: std::ptr::null_mut::<AnyObject>()];
@@ -192,6 +194,7 @@ unsafe fn record_failure(navigation: *mut AnyObject, error: *mut AnyObject) {
         (url, peer)
     };
     let canceled = main_frame::webkit_canceled(&domain, code as i64);
+    super::wk_nav::load_failed(&message, canceled);
     let wants_trust = !peer.is_null() && !canceled;
     tracing::info!(
         "[wk-delegate] main-frame load failed: {domain} {code} {:?}",

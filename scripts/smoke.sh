@@ -12,7 +12,7 @@ export DALZZACK_OUTPUT=full
 
 ID="smoke-$$"
 WORKDIR=$(mktemp -d -t dalzzack-smoke-XXXXXX)
-trap 'dalzzack stop --id "$ID" >/dev/null 2>&1 || true; dalzzack stop --id "$ID-kill" >/dev/null 2>&1 || true; rm -rf "$WORKDIR"' EXIT
+trap 'dalzzack stop --id "$ID" >/dev/null 2>&1 || true; dalzzack stop --id "$ID-kill" >/dev/null 2>&1 || true; [ -n "${FIXTURE_PID:-}" ] && kill "$FIXTURE_PID" >/dev/null 2>&1 || true; rm -rf "$WORKDIR"' EXIT
 
 step() { printf '\n== %s ==\n' "$*"; }
 assert_status() {
@@ -215,6 +215,44 @@ INNER=$(dalzzack exec-js -i "$ID" --script 'return innerWidth + "x" + innerHeigh
 if [ "$INNER" != "375x700" ]; then
   echo "FAIL: the page says it is $INNER, the window reported 375x700" >&2
   exit 1
+fi
+
+step "nav-log sees redirects, statuses and a bot challenge"
+# The fixture answers `/` with 302 -> 301 -> 200, `/challenge` with a 403 carrying
+# cf-mitigated, and `/missing` with a 404. On macOS the navigation delegate feeds
+# the log (navigations only); elsewhere CDP does. Needs node, which CI has.
+if command -v node >/dev/null 2>&1; then
+  FIXTURE_PORT=$((20000 + RANDOM % 20000))
+  node "$(dirname "$0")/fixtures/http-fixture.mjs" "$FIXTURE_PORT" >/dev/null 2>&1 &
+  FIXTURE_PID=$!
+  # Not a job to report on when the trap ends it.
+  disown "$FIXTURE_PID" 2>/dev/null || true
+  sleep 1
+  for route in "" challenge missing; do
+    dalzzack navigate -i "$ID" --url "http://127.0.0.1:$FIXTURE_PORT/$route" >/dev/null
+    sleep 1
+  done
+  dalzzack nav-log -i "$ID" --max 10 | FIXTURE_PORT="$FIXTURE_PORT" python3 -c '
+import json, os, sys
+port = os.environ["FIXTURE_PORT"]
+d = json.load(sys.stdin)
+by = {n["requested_url"]: n for n in d["navigations"]}
+root = by.get(f"http://127.0.0.1:{port}/")
+if not root or root["status"] != 200 or len(root["hops"]) != 3:
+    raise SystemExit(f"FAIL: / should be a 3-hop chain ending in 200: {root}")
+first_hop = root["hops"][0]
+if not first_hop["key_headers"].get("location", "").endswith("/hop2"):
+    raise SystemExit(f"FAIL: the first hop should say where it led: {first_hop}")
+challenge = by.get(f"http://127.0.0.1:{port}/challenge")
+if not challenge or challenge["status"] != 403 or challenge.get("challenge") != "cloudflare:challenge":
+    raise SystemExit(f"FAIL: /challenge should be a 403 flagged as a challenge: {challenge}")
+missing = by.get(f"http://127.0.0.1:{port}/missing")
+if not missing or missing["status"] != 404:
+    raise SystemExit(f"FAIL: /missing should be a 404: {missing}")
+print("nav-log: redirect chain, challenge and 404 seen; source =", d.get("source"))
+'
+else
+  echo "node is not installed: skipping the nav-log fixture check"
 fi
 
 step "stop daemon"
