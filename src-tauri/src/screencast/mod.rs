@@ -292,7 +292,7 @@ pub fn recording_since() -> Option<u64> {
 
 fn set_recording_since(ms: u64) {
     RECORDING_SINCE.store(ms, Ordering::SeqCst);
-    crate::toolbar::refresh();
+    crate::toolbar::push();
 }
 
 fn wall_ms() -> u64 {

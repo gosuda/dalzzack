@@ -390,14 +390,10 @@ fn relayout(window: &WebviewWindow) -> tauri::Result<()> {
 // What the bar shows
 // ---------------------------------------------------------------------------
 
-/// Show what changed outside the toolbar (a screencast began or ended).
-pub fn refresh() {
-    push();
-}
-
 /// Send the bar everything it shows. Safe from any thread, and a no-op until the
-/// bar exists.
-fn push() {
+/// bar exists. Called when something outside the toolbar changes what it shows
+/// (a screencast began or ended).
+pub fn push() {
     let Some(bar) = BAR.get() else { return };
     // The number and the snapshot are taken together, so a higher number is
     // always the newer state, whichever push the bar happens to receive first.

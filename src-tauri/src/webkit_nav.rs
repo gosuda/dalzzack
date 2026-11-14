@@ -73,12 +73,7 @@ impl Tracker {
         format!("wk-{kind}-{}", self.next)
     }
 
-    fn request_event(
-        request: &InFlight,
-        method: &str,
-        redirect_from: Option<&str>,
-        main: bool,
-    ) -> Event {
+    fn request_event(request: &InFlight, method: &str, redirect_from: Option<&str>) -> Event {
         let mut params = json!({
             "requestId": request.request_id,
             "loaderId": request.loader_id,
@@ -97,7 +92,6 @@ impl Tracker {
             });
             params["redirectHasExtraInfo"] = json!(false);
         }
-        let _ = main;
         Event {
             name: "Network.requestWillBeSent",
             params,
@@ -147,7 +141,7 @@ impl Tracker {
                     url: url.to_string(),
                     ..open
                 };
-                events.push(Self::request_event(&hop, method, Some(&previous), main));
+                events.push(Self::request_event(&hop, method, Some(&previous)));
                 self.store(hop, main);
                 return events;
             }
@@ -169,7 +163,7 @@ impl Tracker {
             url: url.to_string(),
             responded: false,
         };
-        events.push(Self::request_event(&request, method, None, main));
+        events.push(Self::request_event(&request, method, None));
         self.store(request, main);
         events
     }
@@ -217,7 +211,7 @@ impl Tracker {
                     url: response.url.clone(),
                     responded: false,
                 };
-                events.push(Self::request_event(&synthetic, "GET", None, main));
+                events.push(Self::request_event(&synthetic, "GET", None));
                 synthetic
             }
         };

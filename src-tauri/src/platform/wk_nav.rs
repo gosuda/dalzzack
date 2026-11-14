@@ -239,8 +239,8 @@ pub unsafe fn install(class: *mut AnyClass, page_webview: *mut AnyObject) {
         &ORIGINAL_RESPONSE,
     );
     if !(action && response) {
-        // Undo a half install: a wrapper whose partner is missing is still
-        // harmless (it calls wry's method), but nothing may claim the log works.
+        // One wrapper may have taken effect. It is harmless (it calls wry's method),
+        // but the log is not armed, so nothing claims it works.
         tracing::error!(
             "[wk-nav] the navigation delegate lacks a method this needs (action: {action}, \
              response: {response}); `nav-log` stays unavailable on this daemon"
