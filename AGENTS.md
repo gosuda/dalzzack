@@ -37,6 +37,7 @@ Rules:
 - Use `wait-for` instead of a sleep, and `wait-navigation` after a click that replaces the document.
 - If a command times out, do not repeat it. Run `dalzzack pause -i b`, and read `dalzzack guide diagnostics`.
 - `start` flags apply only to a new daemon. Use `resize` to change a live window.
+- `start --record` keeps a network/console event tape. It is not a screen recording.
 - In Git Bash, set `MSYS_NO_PATHCONV=1` for a value that starts with `/`.
 
 `dalzzack guide <topic>` prints the details. `dalzzack <command> --help` prints the flags.

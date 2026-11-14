@@ -586,7 +586,10 @@ pub fn run_with_instance_id(opts: AppOptions) {
             let window = builder
                 .title(&window_title)
                 .inner_size(win_width, win_height)
-                .min_inner_size(400.0, 300.0 + bar_height)
+                .min_inner_size(
+                    crate::toolbar::MIN_PAGE_WIDTH,
+                    crate::toolbar::MIN_PAGE_HEIGHT + bar_height,
+                )
                 .resizable(true)
                 .center()
                 // With a toolbar the window is resized once, when it exists and

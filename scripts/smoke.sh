@@ -158,6 +158,65 @@ except Exception:
   exit 1
 fi
 
+step "scroll finds the container the page really scrolls in"
+# A page whose text scrolls inside #page while the window itself cannot: what a
+# documentation site looks like. `scroll` must pick #page, move it, and say so.
+SCROLL_URL=$(python3 - <<'PY'
+import base64
+html = ('<!doctype html><html><body style="margin:0;overflow:hidden">'
+        '<div id="page" style="height:100vh;overflow:auto"><div style="height:3000px">'
+        '<p data-x="y">top</p></div></div></body></html>')
+print("data:text/html;base64," + base64.b64encode(html.encode()).decode())
+PY
+)
+dalzzack navigate -i "$ID" --url "$SCROLL_URL" >/dev/null
+MOVE=$(dalzzack scroll -i "$ID" --amount 300)
+printf '%s' "$MOVE" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if not (d.get("moved") is True and d.get("container") == "#page" and d["scrolled"]["dy"] == 300):
+    raise SystemExit(f"FAIL: scroll did not move #page by 300: {d}")
+print("scrolled", d["container"], d["scrolled"])
+'
+END=$(dalzzack scroll -i "$ID" --to bottom)
+printf '%s' "$END" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if not (d.get("moved") is True and d.get("at_end") is True):
+    raise SystemExit(f"FAIL: scroll --to bottom did not reach the end: {d}")
+'
+STUCK=$(dalzzack scroll -i "$ID" --amount 300)
+printf '%s' "$STUCK" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if d.get("moved") is not False or "end" not in d.get("hint", ""):
+    raise SystemExit(f"FAIL: scrolling past the end should report moved=false with a hint: {d}")
+'
+# A selector with a quote in it used to break the script it was pasted into.
+QUOTED=$(dalzzack scroll -i "$ID" --selector "p[data-x='y']" --amount 10)
+printf '%s' "$QUOTED" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if d.get("status") != "completed" or d.get("moved") is not False:
+    raise SystemExit(f"FAIL: a selector with a quote should run and report moved=false: {d}")
+'
+
+step "resize to a phone size reports the size the page really has"
+RESIZED=$(dalzzack resize -i "$ID" --width 375 --height 700)
+printf '%s' "$RESIZED" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if d.get("exact") is not True or d["viewport"] != {"width": 375, "height": 700}:
+    raise SystemExit(f"FAIL: expected a 375x700 page, got {d}")
+print("page is", d["viewport"])
+'
+INNER=$(dalzzack exec-js -i "$ID" --script 'return innerWidth + "x" + innerHeight' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("result",""))')
+if [ "$INNER" != "375x700" ]; then
+  echo "FAIL: the page says it is $INNER, the window reported 375x700" >&2
+  exit 1
+fi
+
 step "stop daemon"
 dalzzack stop --id "$ID"
 

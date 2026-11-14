@@ -4,16 +4,16 @@
 |-----------|---------|
 | First launch, want a non-default size | `start --id b --width 1920 --height 1080` |
 | Daemon already running, need different size | `resize --id b --width 800 --height 600` |
-| Want viewport size for responsive testing mid-session | `resize --id b --width 375 --height 812` |
+| Phone-size viewport (320 to 430 wide) for responsive testing | `start --id b --width 375 --height 812`, or `resize --id b --width 375 --height 812` |
 | Re-run `start` on an existing id | **Does NOT resize** — returns `already_running`. Use `resize`. |
 
-The size you give is the **page's** (`innerWidth`×`innerHeight`): the window is taller by its toolbar (and, on macOS, its title bar). Screenshots are the page alone.
+The size you give is the **page's** (`innerWidth`×`innerHeight`): the window is taller by its toolbar (and, on macOS, its title bar). Screenshots are the page alone. `start` and `resize` report what the page really got, read natively: `size` / `viewport` and `exact` (with a `note` when a window limited the size). The narrowest window is 320 px wide. This is viewport size only: there is no touch, device-pixel-ratio or user-agent emulation.
 
 `start --width/--height` is **initial size only** and is ignored on subsequent `start` calls for the same id (the daemon is already up). To change a live window, always use `resize`. Run `dalzzack list` first if you're unsure whether an id is alive.
 
 **Instance:**
 - `start [--id ID] [--width PX] [--height PX] [--record] [--watch-hang] [--auto-dump-dir DIR] [--browser-arg FLAG] [--no-console-capture] [--console-capture] [--user-agent UA] [--raw-user-agent] [--enforce-csp] [--no-toolbar] [--private-profile] [--engine webview|chrome] [--chrome-path PATH] [--trust-cert PEM]` — start browser (default 1200x800; window is resizable). If the id already has an unresponsive daemon, auto-kills and respawns (a daemon from before 1.1 has no process identity, so it is left running).
-  - `--record` arms always-on background event capture (network/console/exceptions) so `dump-recording` works even when the renderer is wedged.
+  - `--record` arms always-on background event capture (network/console/exceptions) so `dump-recording` works even when the renderer is wedged. It is an **event tape, not a screen recording**: it holds no pictures and makes no video.
   - `--no-console-capture` collects no console output at all — no CDP subscription, no in-page hook. Rarely needed on Windows, where capture is already invisible to the page (see `console-logs`). `console-logs` then reports `console_transport: "disabled"` instead of an empty buffer.
   - `--console-capture` (**macOS only**) turns console capture ON, accepting that the page can see it. macOS has no invisible transport: WebKit's system-console setting makes WebKit stringify every logged argument twice, and `disable-devtool` counts those `toString` calls — two instead of one reads as "DevTools is open" and protected sites redirect away. So macOS captures nothing by default and `console-logs` reports `unavailable` with the reason. This flag installs the in-page hook instead, reported as `in_page_fallback`.
   - `--user-agent UA` overrides the User-Agent. Unlike `--browser-arg "--user-agent=…"` this needs no private user data folder, so cookies/logins stay shared. **The engine generates its own `Sec-CH-UA` headers and you cannot override those** — a UA whose major version disagrees with the engine is a *stronger* bot signal than the default. On Windows, WebView2 already sends Edge branding at the live runtime version, so the default is left alone; passing this flag also injects a matching `navigator.userAgentData` so the three agree.

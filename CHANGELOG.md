@@ -4,6 +4,34 @@ All notable changes to dalzzack. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [SemVer](https://semver.org).
 
+## [Unreleased]
+
+### Added
+
+- `scroll` finds what a mouse wheel would scroll: the window, or the page's inner
+  scroller when the window cannot scroll (a documentation site whose text scrolls
+  inside `#page`). Its answer is measured: `moved`, `scrolled` (the real distance),
+  `requested`, `container`, `at_start`, `at_end`, and a `hint` plus `scrollables`
+  when nothing moved. `--selector` always wins. `--to left-end|right-end` are now in
+  the help.
+- `start` and `resize` report the size the page really got (`size`/`viewport`,
+  `exact`, and a `note` when the window limited it), read natively from the page's
+  webview. The narrowest window is now 320 px wide (it was 400), so phone widths
+  work. This is viewport size only: no touch, pixel-ratio or user-agent emulation.
+- A usage error on stdout carries clap's "did you mean" tip, and `--script`,
+  `--code` and `--js` are accepted by every command that takes JavaScript.
+
+### Changed
+
+- `scroll`'s `scrolled` is now the distance that was measured, not an echo of the
+  distance asked for (that is `requested`). A scroll that moved nothing used to say
+  `completed` with no sign of it.
+
+### Fixed
+
+- `scroll --selector` with a quote in the selector (`p[data-x='y']`) broke the
+  script it was pasted into. The selector now travels as JSON.
+
 ## [1.4.0] - 2026-11-12
 
 ### Added

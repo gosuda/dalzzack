@@ -60,6 +60,8 @@ pub mod ua;
 pub mod uninstall;
 /// `upgrade` — replace the binary with the latest release.
 pub mod upgrade;
+/// The size of the page a window shows, as the window has it.
+pub mod viewport;
 pub mod webview;
 
 // Re-export public API for backward compatibility

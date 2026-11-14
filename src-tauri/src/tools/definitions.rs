@@ -492,7 +492,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 
         ToolDefinition {
             name: "scroll".to_string(),
-            description: "Scroll the page or a scrollable container. Use `to` for absolute positions (top/bottom/left-end/right-end), or `direction` + `amount` for relative scrolling.".to_string(),
+            description: "Scroll what a mouse wheel would: the window, or the page's inner scroller when the window cannot scroll. Use `to` for absolute positions (top/bottom/left-end/right-end), or `direction` + `amount` for relative scrolling. Reports `moved`, the measured `scrolled`, and the `container` it scrolled.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -500,7 +500,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "to": { "type": "string", "enum": ["top", "bottom", "left-end", "right-end"], "description": "Absolute scroll target. Mutually exclusive with direction/amount." },
                     "direction": { "type": "string", "enum": ["up", "down", "left", "right"], "description": "Relative scroll direction (default: down)." },
                     "amount": { "type": "integer", "description": "Pixels to scroll for relative mode (default 500)." },
-                    "selector": { "type": "string", "description": "CSS selector of a scrollable container. Omit to scroll the page." }
+                    "selector": { "type": "string", "description": "CSS selector of a scrollable container; always wins. Omit to scroll what a mouse wheel would." }
                 }
             }),
         },
@@ -1763,13 +1763,37 @@ async fn tool_resize_window(args: &Value) -> Result<Value> {
         ))
         .map_err(|e| anyhow!("set_size failed: {}", e))?;
 
+    // The window may not give the size asked for, and the layout settles on the
+    // next turns of the event loop, so read the page's size until it stops moving.
+    let mut viewport = crate::viewport::page_viewport(&window);
+    for _ in 0..12 {
+        let wanted = (width as f64, height as f64);
+        if viewport.is_some_and(|(w, h)| (w - wanted.0).abs() <= 1.0 && (h - wanted.1).abs() <= 1.0)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        let now = crate::viewport::page_viewport(&window);
+        if now == viewport {
+            break;
+        }
+        viewport = now;
+    }
+
     tracing::info!("[resize_window] Resized to {}x{}", width, height);
 
-    Ok(serde_json::json!({
+    let mut result = serde_json::json!({
         "status": "completed",
         "width": width,
         "height": height,
-    }))
+    });
+    let report = crate::viewport::size_report((width, height), viewport);
+    result["viewport"] = report["viewport"].clone();
+    result["exact"] = report["exact"].clone();
+    if let Some(note) = report.get("note") {
+        result["note"] = note.clone();
+    }
+    Ok(result)
 }
 
 // ============================================================================
@@ -4664,7 +4688,133 @@ async fn tool_click(args: &Value) -> Result<Value> {
     }
 }
 
-/// scroll — page or element scrolling
+/// What the page runs for `scroll`. The arguments arrive as the four `var`s the
+/// caller puts in front of it (as JSON, never pasted into a quoted string).
+///
+/// The target is what a mouse wheel would scroll: the window if it can scroll,
+/// else the scrollable ancestor of the element at the middle of the viewport
+/// (a documentation site whose text scrolls inside `#page`), else the largest
+/// scrollable element. An explicit selector always wins. The answer is measured,
+/// not echoed: `moved` says whether anything moved, and `scrolled` by how much.
+const SCROLL_JS: &str = r##"
+var root = document.scrollingElement || document.documentElement;
+function isRoot(el) { return el === root || el === document.documentElement || el === document.body; }
+function can(el, axis) {
+  var cs = getComputedStyle(el);
+  if (axis === 'x') { return /(auto|scroll|overlay)/.test(cs.overflowX) && el.scrollWidth - el.clientWidth > 1; }
+  return /(auto|scroll|overlay)/.test(cs.overflowY) && el.scrollHeight - el.clientHeight > 1;
+}
+function rootCan(axis) {
+  return axis === 'x' ? root.scrollWidth - root.clientWidth > 1 : root.scrollHeight - root.clientHeight > 1;
+}
+function name(el) {
+  if (isRoot(el)) { return 'window'; }
+  if (el.id) { return '#' + el.id; }
+  var tag = el.tagName.toLowerCase();
+  var cls = (typeof el.className === 'string' ? el.className : '').trim().split(/\s+/).filter(Boolean).slice(0, 2);
+  return cls.length ? tag + '.' + cls.join('.') : tag;
+}
+function scrollables(limit) {
+  var out = [], all = document.querySelectorAll('*'), n = Math.min(all.length, 6000);
+  for (var i = 0; i < n && out.length < limit; i++) {
+    var el = all[i];
+    if (can(el, 'y') || can(el, 'x')) {
+      out.push({ selector: name(el), scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, scrollTop: Math.round(el.scrollTop) });
+    }
+  }
+  return out;
+}
+function pick(axis) {
+  if (rootCan(axis)) { return root; }
+  var at = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+  for (var n = at; n && n !== document.documentElement; n = n.parentElement) {
+    if (can(n, axis)) { return n; }
+  }
+  var best = null, bestArea = 0, all = document.querySelectorAll('*'), cap = Math.min(all.length, 6000);
+  for (var i = 0; i < cap; i++) {
+    var el = all[i];
+    if (!can(el, axis)) { continue; }
+    var r = el.getBoundingClientRect();
+    var w = Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0));
+    var h = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
+    if (w * h > bestArea) { best = el; bestArea = w * h; }
+  }
+  return best;
+}
+var axis = 'y';
+if (TO) { axis = (TO === 'left-end' || TO === 'right-end') ? 'x' : 'y'; }
+else if (DY === 0 && DX !== 0) { axis = 'x'; }
+var el;
+if (SEL !== null) {
+  el = document.querySelector(SEL);
+  if (!el) { return { status: 'failed', error: 'Selector not found: ' + SEL, scrollables: scrollables(5) }; }
+} else {
+  el = pick(axis);
+}
+if (!el) {
+  return { status: 'completed', moved: false, container: null,
+    hint: 'Nothing on this page can scroll along that axis.', scrollables: [] };
+}
+var win = isRoot(el);
+function pos() { return win ? { x: window.scrollX, y: window.scrollY } : { x: el.scrollLeft, y: el.scrollTop }; }
+var before = pos();
+if (TO) {
+  var tx = before.x, ty = before.y;
+  if (TO === 'top') { ty = 0; }
+  else if (TO === 'bottom') { ty = win ? root.scrollHeight : el.scrollHeight; }
+  else if (TO === 'left-end') { tx = 0; }
+  else if (TO === 'right-end') { tx = win ? root.scrollWidth : el.scrollWidth; }
+  if (win) { window.scrollTo({ left: tx, top: ty, behavior: 'instant' }); }
+  else { el.scrollTop = ty; el.scrollLeft = tx; }
+} else if (win) {
+  window.scrollBy({ left: DX, top: DY, behavior: 'instant' });
+} else {
+  el.scrollBy({ left: DX, top: DY, behavior: 'instant' });
+  var mid = pos();
+  if (mid.y === before.y && DY !== 0) { el.scrollTop = before.y + DY; }
+  if (mid.x === before.x && DX !== 0) { el.scrollLeft = before.x + DX; }
+}
+var after = pos();
+var cw = win ? innerWidth : el.clientWidth, ch = win ? innerHeight : el.clientHeight;
+var sw = win ? root.scrollWidth : el.scrollWidth, sh = win ? root.scrollHeight : el.scrollHeight;
+var moved = after.x !== before.x || after.y !== before.y;
+var atStart = axis === 'y' ? after.y <= 0 : after.x <= 0;
+var atEnd = axis === 'y' ? after.y + ch >= sh - 1 : after.x + cw >= sw - 1;
+var out = { status: 'completed', moved: moved, container: name(el),
+  scrolled: { dx: after.x - before.x, dy: after.y - before.y },
+  at_start: atStart, at_end: atEnd };
+if (TO) { out.to = TO; } else { out.requested = { dx: DX, dy: DY }; }
+if (win) {
+  out.scrollX = after.x; out.scrollY = after.y; out.pageHeight = sh; out.viewportHeight = innerHeight;
+} else {
+  out.element = name(el); out.scrollTop = after.y; out.scrollLeft = after.x;
+  out.scrollHeight = sh; out.clientHeight = ch;
+}
+if (!moved) {
+  if (!win && !can(el, axis)) {
+    out.hint = name(el) + ' does not scroll along that axis.';
+  } else {
+    out.hint = (axis === 'y' ? (atEnd ? 'Already at the end' : 'Already at the start') : (atEnd ? 'Already at the right end' : 'Already at the left end')) + ' of ' + name(el) + '.';
+  }
+  if (SEL === null) { out.scrollables = scrollables(5); }
+}
+return out;
+"##;
+
+/// The script for one `scroll` call: the arguments as JSON, then [`SCROLL_JS`].
+fn scroll_script(selector: Option<&str>, to: Option<&str>, dx: i64, dy: i64) -> String {
+    let json = |text: Option<&str>| serde_json::to_string(&text).unwrap_or_else(|_| "null".into());
+    format!(
+        "var SEL = {}, TO = {}, DX = {}, DY = {};{}",
+        json(selector),
+        json(to),
+        dx,
+        dy,
+        SCROLL_JS
+    )
+}
+
+/// scroll — the page, or what a mouse wheel would scroll on it, or one container.
 async fn tool_scroll(args: &Value) -> Result<Value> {
     let direction = args["direction"].as_str().unwrap_or("down");
     let amount = args["amount"].as_i64().unwrap_or(500);
@@ -4679,66 +4829,13 @@ async fn tool_scroll(args: &Value) -> Result<Value> {
         scroll_to
     );
 
-    // Handle --to absolute positioning
-    if let Some(to_pos) = scroll_to {
-        let script = match selector {
-            Some(sel) => {
-                let scroll_expr = match to_pos {
-                    "top" => "el.scrollTop = 0; el.scrollLeft = el.scrollLeft;",
-                    "bottom" => "el.scrollTop = el.scrollHeight;",
-                    "left-end" => "el.scrollLeft = 0;",
-                    "right-end" => "el.scrollLeft = el.scrollWidth;",
-                    _ => {
-                        return Ok(
-                            serde_json::json!({ "status": "failed", "error": format!("Invalid --to value: {}. Use: top, bottom, left-end, right-end", to_pos) }),
-                        )
-                    }
-                };
-                format!(
-                    r#"var el = document.querySelector('{sel}');
-                    if (!el) return {{ status: 'failed', error: 'Selector not found: {sel}' }};
-                    {scroll_expr}
-                    return {{ status: 'completed', to: '{to_pos}', element: '{sel}',
-                        scrollTop: el.scrollTop, scrollLeft: el.scrollLeft }};"#,
-                    sel = sel,
-                    scroll_expr = scroll_expr,
-                    to_pos = to_pos
-                )
-            }
-            None => {
-                let scroll_expr = match to_pos {
-                    "top" => "window.scrollTo(0, 0);",
-                    "bottom" => "window.scrollTo(0, document.documentElement.scrollHeight);",
-                    "left-end" => "window.scrollTo(0, window.scrollY);",
-                    "right-end" => {
-                        "window.scrollTo(document.documentElement.scrollWidth, window.scrollY);"
-                    }
-                    _ => {
-                        return Ok(
-                            serde_json::json!({ "status": "failed", "error": format!("Invalid --to value: {}. Use: top, bottom, left-end, right-end", to_pos) }),
-                        )
-                    }
-                };
-                format!(
-                    r#"{scroll_expr}
-                    return {{ status: 'completed', to: '{to_pos}',
-                        scrollX: window.scrollX, scrollY: window.scrollY,
-                        pageHeight: document.documentElement.scrollHeight,
-                        viewportHeight: window.innerHeight }};"#,
-                    scroll_expr = scroll_expr,
-                    to_pos = to_pos
-                )
-            }
-        };
-
-        return match webview_execute_js(&script, Some(5000)).await {
-            Ok(result) => Ok(result),
-            Err(e) => Ok(serde_json::json!({
+    if let Some(to) = scroll_to {
+        if !matches!(to, "top" | "bottom" | "left-end" | "right-end") {
+            return Ok(serde_json::json!({
                 "status": "failed",
-                "error": "SCROLL_ERROR",
-                "message": e
-            })),
-        };
+                "error": format!("Invalid --to value: {to}. Use: top, bottom, left-end, right-end"),
+            }));
+        }
     }
 
     let (dx, dy) = match direction {
@@ -4749,36 +4846,7 @@ async fn tool_scroll(args: &Value) -> Result<Value> {
         _ => (0, amount),
     };
 
-    let script = match selector {
-        Some(sel) => format!(
-            r#"var el = document.querySelector('{sel}');
-            if (!el) return {{ status: 'failed', error: 'Selector not found: {sel}' }};
-            var beforeTop = el.scrollTop;
-            var beforeLeft = el.scrollLeft;
-            el.scrollBy({dx}, {dy});
-            if (el.scrollTop === beforeTop && {dy} !== 0) {{
-                el.scrollTop = beforeTop + {dy};
-            }}
-            if (el.scrollLeft === beforeLeft && {dx} !== 0) {{
-                el.scrollLeft = beforeLeft + {dx};
-            }}
-            return {{ status: 'completed', scrolled: {{ dx: {dx}, dy: {dy} }}, element: '{sel}',
-                scrollTop: el.scrollTop, scrollLeft: el.scrollLeft }};"#,
-            sel = sel,
-            dx = dx,
-            dy = dy
-        ),
-        None => format!(
-            r#"window.scrollBy({dx}, {dy});
-            return {{ status: 'completed', scrolled: {{ dx: {dx}, dy: {dy} }},
-                scrollX: window.scrollX, scrollY: window.scrollY,
-                pageHeight: document.documentElement.scrollHeight,
-                viewportHeight: window.innerHeight }};"#,
-            dx = dx,
-            dy = dy
-        ),
-    };
-
+    let script = scroll_script(selector, scroll_to, dx, dy);
     match webview_execute_js(&script, Some(5000)).await {
         Ok(result) => Ok(result),
         Err(e) => Ok(serde_json::json!({
@@ -6316,5 +6384,24 @@ mod tests {
         .unwrap();
         assert_eq!(result["status"], "failed");
         assert_eq!(result["error"], "PATTERN_REQUIRED");
+    }
+
+    #[test]
+    fn a_scroll_selector_travels_as_json_and_cannot_leave_its_string() {
+        let script = scroll_script(Some("a'; alert(1); '\"b"), None, 0, 300);
+        assert!(
+            script.starts_with(r#"var SEL = "a'; alert(1); '\"b", TO = null, DX = 0, DY = 300;"#),
+            "the selector must be one JSON string: {}",
+            &script[..90.min(script.len())]
+        );
+    }
+
+    #[test]
+    fn scroll_arguments_are_data_even_when_they_look_like_code() {
+        let script = scroll_script(None, Some("bottom"), -5, 7);
+        assert!(script.starts_with(r#"var SEL = null, TO = "bottom", DX = -5, DY = 7;"#));
+        // A selector holding what another argument's marker would be stays itself.
+        let script = scroll_script(Some("TO = \"top\""), None, 0, 1);
+        assert!(script.starts_with(r#"var SEL = "TO = \"top\"", TO = null, DX = 0, DY = 1;"#));
     }
 }

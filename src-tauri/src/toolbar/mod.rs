@@ -25,6 +25,11 @@ use tauri::{
 /// address, and a 28 px row for what the window is doing.
 const BAR_HEIGHT: f64 = 64.0;
 
+/// The smallest page a window can be resized to. 320 px wide is the narrowest
+/// phone; a window below that is no longer a page anyone can read.
+pub const MIN_PAGE_WIDTH: f64 = 320.0;
+pub const MIN_PAGE_HEIGHT: f64 = 200.0;
+
 /// Where the bar's links and its address form point. Never resolvable
 /// (`.invalid` is reserved), and always cancelled before it leaves the bar.
 const ACTION_HOST: &str = "dalzzack.invalid";
@@ -261,7 +266,7 @@ pub fn install(
         // page back where it was, and say there is no toolbar.
         set_enabled(false);
         let _ = window.set_size(LogicalSize::new(page_width, page_height));
-        let _ = window.set_min_size(Some(LogicalSize::new(400.0, 300.0)));
+        let _ = window.set_min_size(Some(LogicalSize::new(MIN_PAGE_WIDTH, MIN_PAGE_HEIGHT)));
         let page: &Webview = window.as_ref();
         let _ = page.set_auto_resize(true);
         let _ = page.set_bounds(rect(Frame {
@@ -293,7 +298,10 @@ fn install_bar(
     let inset = measure_title_inset(window);
     let window_height = page_height + BAR_HEIGHT + inset;
     window.set_size(LogicalSize::new(page_width, window_height))?;
-    window.set_min_size(Some(LogicalSize::new(400.0, 300.0 + BAR_HEIGHT + inset)))?;
+    window.set_min_size(Some(LogicalSize::new(
+        MIN_PAGE_WIDTH,
+        MIN_PAGE_HEIGHT + BAR_HEIGHT + inset,
+    )))?;
     window.center()?;
 
     // `set_size` takes effect on the next turn of the event loop, so the first

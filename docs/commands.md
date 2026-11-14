@@ -20,7 +20,7 @@ All commands except `start`, `stop`, `list`, `run`, `guide`, `install`, `tools`,
 | `start … --console-buffer N` | Console ring size (default 500, max 100000). |
 | `start … --browser-arg FLAG` | A Chromium flag for WebView2 (Windows) and for `--engine chrome`. WKWebView ignores it. A WebView2 instance with it gets its own user data folder. `--browser-arg=--ignore-certificate-errors` accepts any certificate; certificates are checked otherwise. |
 | `start … --trust-cert PEM` | **macOS WKWebView only.** Trust the certificates in a PEM file for this instance, on top of the system roots, with every other Safari check kept (825-day limit, host name, key usage). Nothing goes into the keychain. `start` and `list` report `trusted_certs`. Refused on Windows and with `--engine chrome`. |
-| `resize --id <ID> --width PX --height PX` | Change the page size of a running daemon (the window follows; `--width`/`--height` are the page's) |
+| `resize --id <ID> --width PX --height PX` | Change the page size of a running daemon (the window follows; `--width`/`--height` are the page's, down to 320 wide). Reports `viewport` (read natively) and `exact`; a `note` when the window limited the size |
 | `stop --id <ID>` | Graceful stop (sends `__shutdown` over TCP). |
 | `kill --id <ID>` | Force-kill by PID, the escape hatch when `stop` times out on a wedged daemon. It kills only the process that wrote the pid file: the pid file also holds that process's identity, so a pid that now belongs to another program is left alone. A pid file from before 1.1 has no identity, so `kill` refuses it with `unverified_pid`. On a Chrome-engine id it also ends Chrome and deletes its profile. |
 | `list` | List running daemons (pings each, cleans up stale port/pid files). A daemon that hangs shows `status: unresponsive`. Reports `renderer_ok`, `console_transport`, `user_agent` / `user_agent_source`, `record` / `recording` (`on` \| `off` \| `never`), `version`, and, from daemon memory (so a wedged renderer still answers), `current_url`, `last_used` / `last_tool`, `engine`, `browser_version`, `navigator_webdriver`, `profile`, `ttl_s` / `expires_at_ms`. |
@@ -58,8 +58,8 @@ All commands except `start`, `stop`, `list`, `run`, `guide`, `install`, `tools`,
 | `keyboard --text "hello" [--paste]` | Type character-by-character, or paste at once |
 | `keyboard --key Enter [--modifiers ctrl,shift]` | Press special keys |
 | `keyboard --key Tab --native` | Press a named key as a native key event: an `NSEvent` sent to the WebView's window on macOS, CDP `Input.dispatchKeyEvent` on Windows WebView2 (not on Linux). The page gets `isTrusted: true`, and focus crosses cross-origin iframes and closed shadow roots (Tab, then Space, ticks a Cloudflare Turnstile checkbox). No Accessibility permission; the mouse does not move. Not with `--text` |
-| `scroll --to top\|bottom [--selector CSS]` | Absolute scroll (page or SPA container) |
-| `scroll [--direction down] [--amount 500]` | Relative scroll |
+| `scroll --to top\|bottom\|left-end\|right-end [--selector CSS]` | Absolute scroll. Scrolls what a mouse wheel would: the window, or the page's inner scroller when the window cannot scroll. `--selector` always wins. Reports `moved`, `container`, `at_start`/`at_end` |
+| `scroll [--direction down] [--amount 500] [--selector CSS]` | Relative scroll. `scrolled` is the measured distance and `requested` the asked one; when nothing moved, `hint` says why and `scrollables` lists what can scroll |
 | `upload-file --selector "input[type=file]" --file PATH` | Upload file (max 50 MB) |
 | `save-image --selector CSS --output PATH [--index -1]` | Save DOM `<img>` to disk |
 

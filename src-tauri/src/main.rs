@@ -512,7 +512,8 @@ enum Cli {
         click_type: String,
     },
 
-    /// Scroll the page or a specific element.
+    /// Scroll what a mouse wheel would, or a specific element. The result says whether
+    /// anything `moved`, by how much (`scrolled`), and which `container` scrolled.
     /// Use --to for absolute positioning, or --direction + --amount for relative.
     /// Example: --to bottom --selector ".chat-container"
     /// Example: --direction down --amount 500
@@ -526,10 +527,11 @@ enum Cli {
         /// Scroll amount in pixels (default: 500)
         #[arg(long, default_value = "500", alias = "pixels")]
         amount: i32,
-        /// CSS selector to scroll within (default: page)
+        /// CSS selector to scroll within (default: what a mouse wheel would scroll: the
+        /// window, or the page's inner scroller when the window cannot scroll)
         #[arg(long)]
         selector: Option<String>,
-        /// Scroll to absolute position: top, bottom (overrides --direction/--amount)
+        /// Scroll to absolute position: top, bottom, left-end, right-end (overrides --direction/--amount)
         #[arg(long)]
         to: Option<String>,
     },
@@ -546,7 +548,7 @@ enum Cli {
         /// JavaScript code to execute (use 'return' to get a value, e.g. 'return document.title')
         #[arg(
             long,
-            alias = "code",
+            aliases = ["code", "js"],
             required_unless_present = "file",
             conflicts_with = "file"
         )]
@@ -846,7 +848,7 @@ enum Cli {
         #[arg(long)]
         name: String,
         /// JavaScript source to run at document start
-        #[arg(long, conflicts_with = "file")]
+        #[arg(long, aliases = ["code", "js"], conflicts_with = "file")]
         script: Option<String>,
         /// Read the script from a file instead of --script
         #[arg(long, conflicts_with = "script")]
@@ -1142,7 +1144,7 @@ enum Cli {
         #[arg(long, short, default_value = "")]
         id: String,
         /// JavaScript to evaluate (use 'return' to get a value).
-        #[arg(long, alias = "code")]
+        #[arg(long, aliases = ["code", "js"])]
         script: String,
         /// Execution timeout in ms (default 30000).
         #[arg(long, default_value = "30000")]
@@ -1155,7 +1157,7 @@ enum Cli {
         #[arg(long, short, default_value = "")]
         id: String,
         /// JS expression/body; a truthy return ends the wait (use 'return').
-        #[arg(long, alias = "js")]
+        #[arg(long, aliases = ["code", "js"])]
         script: String,
         /// Overall timeout in ms (default 30000).
         #[arg(long, default_value = "30000")]
@@ -1530,10 +1532,20 @@ fn emit_result(
     }
 }
 
-/// The first line of a clap error, which says what is wrong.
+/// The first line of a clap error, which says what is wrong, and clap's `tip:`
+/// when it has one ("a similar argument exists: '--script'"). The tip is what
+/// turns a typo into a one-step fix, and clap prints it to stderr only, which a
+/// reader of this JSON on stdout never sees.
 fn usage_message(e: &clap::Error) -> String {
     let text = e.render().to_string();
-    text.lines().next().unwrap_or("invalid usage").to_string()
+    let first = text.lines().next().unwrap_or("invalid usage");
+    match text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("tip:"))
+    {
+        Some(tip) => format!("{first} (tip:{tip})"),
+        None => first.to_string(),
+    }
 }
 
 fn main() {
@@ -2985,6 +2997,51 @@ mod tests {
 
             let step = command_step(&json!(["get-html", "--selector", "h1"])).unwrap();
             assert_eq!(step.tool, "get_html");
+        });
+    }
+
+    #[test]
+    fn a_usage_error_carries_clap_s_did_you_mean() {
+        with_main_stack(|| {
+            let e = Args::try_parse_from(["dalzzack", "exec-js", "--scirpt", "1"])
+                .err()
+                .unwrap();
+            let message = usage_message(&e);
+            assert!(
+                message.contains("unexpected argument '--scirpt'")
+                    && message.contains("tip:")
+                    && message.contains("--script"),
+                "{message}"
+            );
+            // An error clap has no suggestion for stays one line.
+            let e = Args::try_parse_from(["dalzzack", "no-such-command"])
+                .err()
+                .unwrap();
+            assert!(!usage_message(&e).contains('\n'));
+        });
+    }
+
+    #[test]
+    fn every_command_that_takes_javascript_accepts_all_three_names_for_it() {
+        with_main_stack(|| {
+            let commands: [&[&str]; 4] = [
+                &["exec-js"],
+                &["exec-js-isolated"],
+                &["wait-for-condition"],
+                &["inject-script", "--name", "n"],
+            ];
+            for flag in ["--script", "--code", "--js"] {
+                for command in commands {
+                    let mut words = vec!["dalzzack"];
+                    words.extend(command);
+                    words.extend([flag, "return 1"]);
+                    assert!(
+                        Args::try_parse_from(&words).is_ok(),
+                        "{} {flag} should parse",
+                        command[0]
+                    );
+                }
+            }
         });
     }
 
