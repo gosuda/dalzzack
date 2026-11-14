@@ -201,6 +201,40 @@ if d.get("status") != "completed" or d.get("moved") is not False:
     raise SystemExit(f"FAIL: a selector with a quote should run and report moved=false: {d}")
 '
 
+step "screencast records a scroll as an mp4"
+# Needs ffmpeg to encode (skipped without it) and a screencast source for this
+# engine (the Windows default engine has none yet and says so).
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "ffmpeg is not installed: skipping the screencast check"
+else
+  START=$(dalzzack screencast start -i "$ID" || true)
+  if printf '%s' "$START" | grep -q UNSUPPORTED_PLATFORM; then
+    echo "no screencast source on this platform: skipping"
+  else
+    printf '%s' "$START" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if d.get("status") != "started":
+    raise SystemExit(f"FAIL: screencast start: {d}")
+'
+    dalzzack scroll -i "$ID" --to top >/dev/null
+    for _ in 1 2 3 4 5 6; do dalzzack scroll -i "$ID" --amount 100 >/dev/null; sleep 0.3; done
+    dalzzack screencast stop -i "$ID" --output "$WORKDIR/smoke.mp4" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if d.get("status") != "completed" or d.get("frames", 0) < 3:
+    raise SystemExit(f"FAIL: screencast stop: {d}")
+print("recorded", d["frames"], "frames,", d["duration_ms"], "ms")
+'
+    PROBE=$(ffprobe -v error -show_entries stream=codec_name,pix_fmt:format=duration -of csv=p=0 "$WORKDIR/smoke.mp4" | tr '\n' ' ')
+    echo "mp4: $PROBE"
+    case "$PROBE" in
+      h264,yuv420p*) ;;
+      *) echo "FAIL: expected an H.264 yuv420p video, got: $PROBE" >&2; exit 1 ;;
+    esac
+  fi
+fi
+
 step "resize to a phone size reports the size the page really has"
 RESIZED=$(dalzzack resize -i "$ID" --width 375 --height 700)
 printf '%s' "$RESIZED" | python3 -c '

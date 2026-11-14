@@ -1241,6 +1241,8 @@ async fn handle_connection(
         // find this daemon still answering pings — and the port file goes
         // first, so nothing new connects meanwhile.
         let mut result = serde_json::json!({ "message": "Shutting down" });
+        // An unfinished recording is frames on disk that nothing will encode.
+        crate::screencast::abort().await;
         if crate::engine::is_chrome() {
             let _ = std::fs::remove_file(&port_file);
             result["chrome"] = crate::chrome::shutdown().await;

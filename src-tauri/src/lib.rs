@@ -45,6 +45,8 @@ pub mod reset;
 /// Response headers captured from CDP — the only view of the navigation
 /// document's headers, where CSP/CORP/cache policy is decided.
 pub mod response_headers;
+/// `screencast`: the page as an mp4.
+pub mod screencast;
 pub mod site_data;
 pub mod state;
 pub mod sw_console;

@@ -29,6 +29,17 @@ All notable changes to dalzzack. The format loosely follows
   (`source`, `coverage` and `limits` say so). `navigate` gains its `document` chain
   and `challenge` on macOS, and `list` reports `nav_log` and a live `current_url`.
 
+- `screencast start|stop|status`: record the page as an mp4. Run commands (scroll,
+  click, navigate) between `start` and `stop --output FILE`. Page only (not the
+  window, the toolbar or the screen), H.264 `yuv420p`, in real time, at the page's
+  size in CSS pixels. On macOS it takes WebKit snapshots of the page (measured at
+  about 50 frames a second, with the window in front, in the background or covered);
+  on `--engine chrome` it uses CDP `Page.startScreencast`. ffmpeg makes the file at
+  `stop`; without it the frames are kept (`FFMPEG_NOT_FOUND`) and `stop` can be run
+  again. Capture ends by itself at `--max-seconds` (default 120). While it records,
+  the window's toolbar shows `REC` and the time. The Windows default engine
+  answers `UNSUPPORTED_PLATFORM`; use `--engine chrome` there.
+
 ### Changed
 
 - `scroll`'s `scrolled` is now the distance that was measured, not an echo of the

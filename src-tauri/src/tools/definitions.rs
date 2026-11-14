@@ -736,6 +736,21 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "screencast".to_string(),
+            description: "Record the page as an mp4: `start`, run any commands (scroll, click, navigate), then `stop` with `output`. Page only (not the window, toolbar or screen), in real time, one recording per instance. Needs ffmpeg for `stop` (`FFMPEG_NOT_FOUND` keeps the frames; install it and `stop` again). It stops capturing by itself at `max_seconds`. macOS default engine and `--engine chrome`; not the event tape (`record`).".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "site": site_param(),
+                    "action": { "type": "string", "enum": ["start", "stop", "status"], "description": "Default `status`." },
+                    "output": { "type": "string", "description": "With `stop`: the mp4 file (relative paths go under the instance's folder; default screencast.mp4)." },
+                    "fps": { "type": "integer", "description": "With `start`: video frame rate, 1-60 (default 30)." },
+                    "max_seconds": { "type": "integer", "description": "With `start`: capture ends after this many seconds, 1-600 (default 120)." },
+                    "quality": { "type": "integer", "description": "With `start`: JPEG quality of the frames, 1-100 (default 80)." }
+                }
+            }),
+        },
+        ToolDefinition {
             name: "cookies".to_string(),
             description: "Read or delete the browser's cookie jar through CDP — including HttpOnly cookies (invisible to `document.cookie`) and cookies set on PARENT domains (`.example.com`: `_ga`, consent, cross-subdomain sessions) and on third-party domains, which `clear_site_data` (one origin) leaves behind. Scope: default = exactly what the browser would send to the current page URL; `url` = the same for another URL; `domain` = every cookie on that domain, its subdomains AND its parents; `all` = the whole jar. `name` narrows to one cookie. Values are masked unless `no_redact`. `clear` deletes the selection and then re-reads the jar, reporting `remaining` — a CDP delete whose domain does not match exactly is otherwise a silent no-op. Each cookie reports snake_case fields: `http_only`, `secure`, `same_site`, `host_only`, `session`, `expires`. Plain daemons SHARE one profile, and it outlives them: `clear` on it refuses (`SHARED_PROFILE`) even when no other daemon is running, unless `force_shared`; `dry_run` lists what would be deleted. Reads CDP (WebView2 on Windows, or `--engine chrome`), or the WKWebView `WKHTTPCookieStore` on macOS, with the same fields.".to_string(),
             input_schema: serde_json::json!({
@@ -1044,6 +1059,7 @@ pub async fn execute_tool(name: &str, args: &Value) -> Result<Value> {
         "save_image" => tool_save_image(args).await,
         "describe" => tool_describe(args).await,
         "resize_window" => tool_resize_window(args).await,
+        "screencast" => crate::screencast::tool(args).await,
         "back" => tool_history(args, "back").await,
         "forward" => tool_history(args, "forward").await,
         "reload" => tool_reload(args).await,
@@ -1851,7 +1867,7 @@ pub(crate) async fn collect_nearby_interactive(limit: usize) -> Vec<Value> {
 }
 
 /// The folder for one instance's files, created when missing.
-async fn site_dir(site: &str) -> Result<std::path::PathBuf> {
+pub(crate) async fn site_dir(site: &str) -> Result<std::path::PathBuf> {
     let dir = get_sites_path().join(site);
     tokio::fs::create_dir_all(&dir)
         .await

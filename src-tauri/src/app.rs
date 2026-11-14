@@ -313,6 +313,7 @@ footer code{font-size:13px;color:var(--ink);background:rgba(255,255,255,.7);bord
       <li><code>resize</code><span>Change the window size</span></li>
       <li><code>reset</code><span>Back to a first-visit state</span></li>
       <li><code>record</code><span>Turn the event tape on/off</span></li>
+      <li><code>screencast</code><span>Record the page as an mp4</span></li>
     </ul></div>
     <div class="g c2"><div class="gbar"><i></i><i></i><i></i><h3><b></b>Navigate</h3></div><ul>
       <li><code>navigate</code><span>Open a URL and wait</span></li>

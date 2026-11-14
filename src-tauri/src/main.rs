@@ -438,6 +438,30 @@ enum Cli {
         clear: bool,
     },
 
+    /// Record the page as an mp4 (`screencast start`, any commands, `screencast stop --output
+    /// a.mp4`). Page only, in real time. `record` is an event tape, not a recording.
+    /// Needs ffmpeg for `stop`; without it the frames are kept and `stop` can be run again.
+    /// Example: `screencast start`, `scroll --amount 300` (repeat), `screencast stop --output docs.mp4`
+    Screencast {
+        /// start | stop | status
+        #[arg(value_parser = ["start", "stop", "status"], default_value = "status")]
+        action: String,
+        #[arg(long, short, default_value = "")]
+        id: String,
+        /// With `stop`: the mp4 to write (a relative path goes under the instance's folder).
+        #[arg(long)]
+        output: Option<String>,
+        /// With `start`: video frames per second, 1-60 (default 30).
+        #[arg(long)]
+        fps: Option<u32>,
+        /// With `start`: stop capturing after this many seconds, 1-600 (default 120).
+        #[arg(long = "max-seconds")]
+        max_seconds: Option<u64>,
+        /// With `start`: JPEG quality of the frames, 1-100 (default 80).
+        #[arg(long)]
+        quality: Option<u8>,
+    },
+
     /// Stop a running browser instance (graceful — sends __shutdown over TCP).
     /// If the daemon is hung and won't accept the shutdown, use `kill` instead.
     Stop {
@@ -2484,6 +2508,24 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
             "record".into(),
             serde_json::json!({ "action": action, "clear": clear }),
         ),
+        Cli::Screencast {
+            action,
+            id,
+            output,
+            fps,
+            max_seconds,
+            quality,
+        } => (
+            id,
+            "screencast".into(),
+            serde_json::json!({
+                "action": action,
+                "output": output,
+                "fps": fps,
+                "max_seconds": max_seconds,
+                "quality": quality,
+            }),
+        ),
         Cli::Cookies {
             action,
             id,
@@ -2696,7 +2738,7 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
 
 /// The parts of the guide that `install` leaves out, so that an agent pays for
 /// them only when it needs them: name, what it covers, text.
-const GUIDE_TOPICS: [(&str, &str, &str); 11] = [
+const GUIDE_TOPICS: [(&str, &str, &str); 12] = [
     (
         "instance",
         "start, stop, list, reset, resize, upgrade, install",
@@ -2741,6 +2783,11 @@ const GUIDE_TOPICS: [(&str, &str, &str); 11] = [
         "chrome",
         "drive a real Google Chrome with --engine chrome",
         include_str!("../guide/chrome.md"),
+    ),
+    (
+        "screencast",
+        "record the page as an mp4: screencast start, then stop",
+        include_str!("../guide/screencast.md"),
     ),
     (
         "output",

@@ -390,6 +390,11 @@ fn relayout(window: &WebviewWindow) -> tauri::Result<()> {
 // What the bar shows
 // ---------------------------------------------------------------------------
 
+/// Show what changed outside the toolbar (a screencast began or ended).
+pub fn refresh() {
+    push();
+}
+
 /// Send the bar everything it shows. Safe from any thread, and a no-op until the
 /// bar exists.
 fn push() {
@@ -408,6 +413,8 @@ fn push() {
             "canForward": n.can_forward(),
         },
         "activity": crate::activity::snapshot(),
+        // Epoch ms a screencast began capturing, for the REC badge; null when none.
+        "recording": crate::screencast::recording_since(),
     });
     // The number and the snapshot are what the lock is for. Sending can wait on
     // the main thread in some builds, so it happens outside it, and a late
