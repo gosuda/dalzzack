@@ -33,12 +33,14 @@ pub fn concat_list(frames: &[FrameMeta], end_ms: u64, fps: u32) -> String {
             hold_ms.max(1)
         };
         out.push_str(&format!("file '{}'\n", quoted(&frame.file)));
+        out.push_str("option framerate 1000\n");
         out.push_str(&format!("duration {:.3}\n", hold_ms as f64 / 1000.0));
     }
     // The concat demuxer ignores the duration of the last entry unless its file
     // is named once more.
     if let Some(last) = frames.last() {
         out.push_str(&format!("file '{}'\n", quoted(&last.file)));
+        out.push_str("option framerate 1000\n");
     }
     out
 }
@@ -124,10 +126,10 @@ mod tests {
         assert_eq!(
             list,
             "ffconcat version 1.0\n\
-             file '/tmp/f/a.jpg'\nduration 0.400\n\
-             file '/tmp/f/b.jpg'\nduration 0.600\n\
-             file '/tmp/f/c.jpg'\nduration 0.500\n\
-             file '/tmp/f/c.jpg'\n"
+             file '/tmp/f/a.jpg'\noption framerate 1000\nduration 0.400\n\
+             file '/tmp/f/b.jpg'\noption framerate 1000\nduration 0.600\n\
+             file '/tmp/f/c.jpg'\noption framerate 1000\nduration 0.500\n\
+             file '/tmp/f/c.jpg'\noption framerate 1000\n"
         );
     }
 
@@ -142,7 +144,7 @@ mod tests {
     fn the_last_frame_is_never_shorter_than_one_frame_time() {
         let list = concat_list(&[frame(0, "a"), frame(500, "b")], 500, 25);
         assert!(
-            list.contains("file '/tmp/f/b.jpg'\nduration 0.040"),
+            list.contains("file '/tmp/f/b.jpg'\noption framerate 1000\nduration 0.040"),
             "{list}"
         );
     }
@@ -151,7 +153,7 @@ mod tests {
     fn two_frames_at_the_same_instant_do_not_make_a_zero_length_entry() {
         let list = concat_list(&[frame(10, "a"), frame(10, "b")], 600, 30);
         assert!(
-            list.contains("file '/tmp/f/a.jpg'\nduration 0.001"),
+            list.contains("file '/tmp/f/a.jpg'\noption framerate 1000\nduration 0.001"),
             "{list}"
         );
     }
