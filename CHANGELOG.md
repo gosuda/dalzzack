@@ -57,13 +57,6 @@ All notable changes to dalzzack. The format loosely follows
 - `scroll --selector` with a quote in the selector (`p[data-x='y']`) broke the
   script it was pasted into. The selector now travels as JSON.
 
-### Known issues
-
-- The video shows about 24 different frames a second whatever `--fps` is set to.
-  The frame list leaves ffmpeg's image timebase at 1/25 s, so frames captured
-  faster than that are dropped and repeated: a faster capture does not give a
-  smoother video yet. Measured on macOS with real recordings at 30 and 60 fps.
-
 ## [1.4.0] - 2026-11-12
 
 ### Added
