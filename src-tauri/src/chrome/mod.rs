@@ -831,6 +831,8 @@ fn exit_daemon() -> ! {
         let _ = std::fs::remove_file(crate::daemon::pid_file_path(&o.instance_id));
         let _ = std::fs::remove_file(launch::record_path(&o.instance_id));
     }
+    // An unfinished screencast is frames nothing will encode.
+    crate::screencast::discard_files();
     std::process::exit(0);
 }
 

@@ -304,8 +304,15 @@ fn set_files(dir: Option<PathBuf>) {
 /// out) and nothing else would remove them.
 pub fn discard_files() {
     let dir = FILES.lock().unwrap_or_else(|e| e.into_inner()).take();
-    if let Some(dir) = dir {
-        let _ = std::fs::remove_dir_all(dir);
+    let Some(dir) = dir else { return };
+    // No more frames: a source may still be producing them, and the writer
+    // would put one in the folder while it is being removed.
+    *SINK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    for _ in 0..3 {
+        if std::fs::remove_dir_all(&dir).is_ok() || !dir.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(30));
     }
 }
 
@@ -420,6 +427,8 @@ pub async fn start(site: &str, options: Options) -> Result<Value, Failure> {
         )
     })?;
 
+    // From here an exit that cannot wait still removes the folder.
+    set_files(Some(dir.clone()));
     let counters = Arc::new(Counters::default());
     let (tx, rx) = mpsc::channel(QUEUE);
     let started = Instant::now();
@@ -439,12 +448,12 @@ pub async fn start(site: &str, options: Options) -> Result<Value, Failure> {
             *SINK.lock().unwrap_or_else(|e| e.into_inner()) = None;
             let _ = writer.await;
             let _ = tokio::fs::remove_dir_all(&dir).await;
+            set_files(None);
             return Err(failure);
         }
     };
     spawn_watchdog();
     set_recording_since(wall_ms());
-    set_files(Some(dir.clone()));
     *slot = Some(Session {
         dir,
         options,
@@ -483,8 +492,8 @@ pub async fn stop(site: &str, output: Option<&str>) -> Result<Value, Failure> {
     if frames.is_empty() {
         let dir = session.dir.clone();
         *slot = None;
-        set_files(None);
         let _ = tokio::fs::remove_dir_all(&dir).await;
+        set_files(None);
         return Err(Failure::new(
             "NO_FRAMES",
             "The recording captured no frames: the page did not paint while it ran. Nothing was written.",
@@ -543,8 +552,8 @@ pub async fn stop(site: &str, output: Option<&str>) -> Result<Value, Failure> {
     let duration_ms = end_ms.saturating_sub(first_ms);
     let dir = session.dir.clone();
     *slot = None;
-    set_files(None);
     let _ = tokio::fs::remove_dir_all(&dir).await;
+    set_files(None);
     Ok(json!({
         "status": "completed",
         "file": crate::state::printable_path(&output_path),
@@ -604,8 +613,8 @@ pub async fn abort() {
     let mut slot = SESSION.lock().await;
     if let Some(mut session) = slot.take() {
         end_capture(&mut session, "daemon_stopping").await;
-        set_files(None);
         let _ = tokio::fs::remove_dir_all(&session.dir).await;
+        set_files(None);
     }
 }
 
