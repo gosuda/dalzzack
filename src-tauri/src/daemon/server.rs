@@ -143,6 +143,7 @@ pub(crate) fn arm_ttl(instance_id: &str, secs: u64) {
         }
         let _ = std::fs::remove_file(port_file_path(&id));
         let _ = std::fs::remove_file(pid_file_path(&id));
+        crate::screencast::discard_files();
         std::process::exit(0);
     });
 }

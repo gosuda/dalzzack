@@ -137,5 +137,9 @@ unsafe fn jpeg_bytes(image: *mut AnyObject, quality: u8) -> Vec<u8> {
     }
     let len: usize = msg_send![data, length];
     let bytes: *const u8 = msg_send![data, bytes];
+    // An empty NSData may have no buffer at all, and a slice needs one.
+    if len == 0 || bytes.is_null() {
+        return Vec::new();
+    }
     std::slice::from_raw_parts(bytes, len).to_vec()
 }

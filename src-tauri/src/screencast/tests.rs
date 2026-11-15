@@ -91,6 +91,49 @@ async fn a_recording_runs_from_start_to_a_video() {
         start("t", defaults).await.unwrap_err().code,
         "ALREADY_RECORDING"
     );
+    let kept = std::env::temp_dir().join(format!(
+        "dalzzack-screencast-kept-{}.mp4",
+        std::process::id()
+    ));
+    let kept_text = kept.to_string_lossy().to_string();
+    if encode::find_ffmpeg().is_some() {
+        // The kept frames are what `stop` encodes, and it says why capture ended.
+        let done = stop("t", Some(&kept_text)).await.unwrap();
+        assert_eq!(done["status"], "completed", "{done}");
+        assert_eq!(done["ended_because"], "max_seconds");
+        assert_eq!(done["frames"], 1);
+        assert!(kept.metadata().unwrap().len() > 0);
+        let _ = std::fs::remove_file(&kept);
+    } else {
+        abort().await;
+    }
+    assert_eq!(status().await["state"], "idle");
+
+    // A source that gives up (WebKit stopped giving snapshots) ends capture,
+    // and `status` says so instead of reporting a recording that is not.
+    SCRIPTED_DIES.store(true, Ordering::SeqCst);
+    start("t", defaults).await.unwrap();
+    push_frame(jpeg());
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let s = status().await;
+    assert_eq!(s["state"], "capture_ended", "{s}");
+    assert_eq!(s["ended_because"], "source_failed");
+    assert!(!is_recording());
+    SCRIPTED_DIES.store(false, Ordering::SeqCst);
+    abort().await;
+
+    // An exit that cannot wait (the window closed) still removes the frames.
+    start("t", defaults).await.unwrap();
+    push_frame(jpeg());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let dir = FILES
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a recording has a folder");
+    assert!(dir.exists());
+    discard_files();
+    assert!(!dir.exists(), "the frames are gone");
     abort().await;
     assert_eq!(status().await["state"], "idle");
 

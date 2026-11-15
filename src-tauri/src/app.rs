@@ -649,6 +649,8 @@ pub fn run_with_instance_id(opts: AppOptions) {
                         let _ = std::fs::remove_file(crate::daemon::pid_file_path(id));
                         tracing::info!("Window closed — daemon shutting down (id: {})", id);
                     }
+                    // An unfinished screencast is frames nothing will encode.
+                    crate::screencast::discard_files();
                     std::process::exit(0);
                 }
             });

@@ -137,6 +137,9 @@ impl Source {
         options: &Options,
         stop: &Arc<AtomicBool>,
     ) -> Result<Option<JoinHandle<()>>, Failure> {
+        // Only the macOS source (and the tests') run a task that `stop` ends.
+        #[cfg(not(any(target_os = "macos", test)))]
+        let _ = stop;
         match self {
             Source::Chrome => chrome_start(options).await.map(|_| None),
             #[cfg(target_os = "macos")]
@@ -144,7 +147,11 @@ impl Source {
             #[cfg(test)]
             Source::Scripted => {
                 let _ = (options, stop);
-                Ok(None)
+                // A source that gives up at once, as the macOS one does when
+                // WebKit stops giving snapshots.
+                Ok(SCRIPTED_DIES
+                    .load(Ordering::SeqCst)
+                    .then(|| tokio::spawn(async {})))
             }
         }
     }
@@ -243,6 +250,9 @@ async fn write_frames(
                 offset_ms: frame.offset_ms,
                 file,
             });
+        } else {
+            // A full disk: the frame is lost like one the queue had no room for.
+            counters.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
     written
@@ -278,6 +288,26 @@ static SESSION: tokio::sync::Mutex<Option<Session>> = tokio::sync::Mutex::const_
 
 #[cfg(test)]
 static SCRIPTED: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static SCRIPTED_DIES: AtomicBool = AtomicBool::new(false);
+
+/// The folder of the recording in progress, for [`discard_files`]: an exit that
+/// cannot wait for [`abort`] still throws the frames away.
+static FILES: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+fn set_files(dir: Option<PathBuf>) {
+    *FILES.lock().unwrap_or_else(|e| e.into_inner()) = dir;
+}
+
+/// Throw the frames of an unfinished recording away now, without waiting for
+/// anything: the process is about to exit (the window was closed, the TTL ran
+/// out) and nothing else would remove them.
+pub fn discard_files() {
+    let dir = FILES.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(dir) = dir {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
 
 /// When capture began (epoch ms), or 0: what the toolbar's REC badge counts from.
 static RECORDING_SINCE: AtomicU64 = AtomicU64::new(0);
@@ -342,14 +372,21 @@ fn spawn_watchdog() -> JoinHandle<()> {
             }
             let over_time = session.started.elapsed().as_secs() >= session.options.max_seconds;
             let over_size = session.counters.bytes.load(Ordering::Relaxed) >= MAX_BYTES;
-            if over_time || over_size {
+            // The macOS source stops by itself when WebKit gives no snapshots.
+            let source_gone = session
+                .source_task
+                .as_ref()
+                .is_some_and(|task| task.is_finished());
+            if over_time || over_size || source_gone {
                 let reason = if over_time {
                     "max_seconds"
-                } else {
+                } else if over_size {
                     "max_bytes"
+                } else {
+                    "source_failed"
                 };
                 end_capture(session, reason).await;
-                tracing::info!("[screencast] capture ended by its limit: {reason}");
+                tracing::info!("[screencast] capture ended: {reason}");
                 return;
             }
         }
@@ -397,6 +434,8 @@ pub async fn start(site: &str, options: Options) -> Result<Value, Failure> {
     let source_task = match source.start(&options, &stop_source).await {
         Ok(task) => task,
         Err(failure) => {
+            // Chrome may have started sending frames before the call timed out.
+            source.stop().await;
             *SINK.lock().unwrap_or_else(|e| e.into_inner()) = None;
             let _ = writer.await;
             let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -405,6 +444,7 @@ pub async fn start(site: &str, options: Options) -> Result<Value, Failure> {
     };
     spawn_watchdog();
     set_recording_since(wall_ms());
+    set_files(Some(dir.clone()));
     *slot = Some(Session {
         dir,
         options,
@@ -443,6 +483,7 @@ pub async fn stop(site: &str, output: Option<&str>) -> Result<Value, Failure> {
     if frames.is_empty() {
         let dir = session.dir.clone();
         *slot = None;
+        set_files(None);
         let _ = tokio::fs::remove_dir_all(&dir).await;
         return Err(Failure::new(
             "NO_FRAMES",
@@ -454,9 +495,12 @@ pub async fn stop(site: &str, output: Option<&str>) -> Result<Value, Failure> {
         return Err(Failure::new(
             "FFMPEG_NOT_FOUND",
             format!(
-                "ffmpeg is needed to make the mp4 and was not found on PATH. The {} captured frames \
-                 are kept: install ffmpeg (macOS: `brew install ffmpeg`; Windows: `winget install \
-                 ffmpeg`), or point DALZZACK_FFMPEG at it, then run `screencast stop` again.",
+                "ffmpeg is needed to make the mp4 and was not found by this daemon (it looks in \
+                 the PATH and environment it was started with, then in /opt/homebrew/bin, \
+                 /usr/local/bin and /usr/bin). The {} captured frames are kept: put ffmpeg in one \
+                 of those folders (macOS: `brew install ffmpeg`) and run `screencast stop` again. \
+                 A new PATH or DALZZACK_FFMPEG reaches only a daemon started after it is set, and \
+                 stopping the daemon discards the frames.",
                 frames.len()
             ),
         ));
@@ -499,6 +543,7 @@ pub async fn stop(site: &str, output: Option<&str>) -> Result<Value, Failure> {
     let duration_ms = end_ms.saturating_sub(first_ms);
     let dir = session.dir.clone();
     *slot = None;
+    set_files(None);
     let _ = tokio::fs::remove_dir_all(&dir).await;
     Ok(json!({
         "status": "completed",
@@ -528,6 +573,7 @@ pub async fn status() -> Value {
         Phase::Ended { end_ms, .. } => end_ms,
     };
     let received = session.counters.received.load(Ordering::Relaxed);
+    let dropped = session.counters.dropped.load(Ordering::Relaxed);
     let (state, reason) = match session.phase {
         Phase::Capturing => ("recording", Value::Null),
         Phase::Ended { reason, .. } => ("capture_ended", json!(reason)),
@@ -538,8 +584,10 @@ pub async fn status() -> Value {
         "state": state,
         "source": session.source.as_str(),
         "elapsed_ms": elapsed_ms,
-        "frames": received,
-        "frames_dropped": session.counters.dropped.load(Ordering::Relaxed),
+        // Kept frames, as `stop` counts them; `frames_received` includes the dropped.
+        "frames": received.saturating_sub(dropped),
+        "frames_received": received,
+        "frames_dropped": dropped,
         "bytes": session.counters.bytes.load(Ordering::Relaxed),
         "max_seconds": session.options.max_seconds,
         "ended_because": reason,
@@ -556,6 +604,7 @@ pub async fn abort() {
     let mut slot = SESSION.lock().await;
     if let Some(mut session) = slot.take() {
         end_capture(&mut session, "daemon_stopping").await;
+        set_files(None);
         let _ = tokio::fs::remove_dir_all(&session.dir).await;
     }
 }
