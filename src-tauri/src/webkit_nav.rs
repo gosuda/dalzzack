@@ -59,9 +59,6 @@ struct InFlight {
     /// failure callbacks name. `0` for an iframe, and for a load the log saw
     /// only from its response.
     navigation: usize,
-    /// For an iframe: how many main-frame loads had started when it began, so a
-    /// new document closes only the iframes of the one before.
-    generation: u64,
     /// The URL this request is at now: the last hop.
     url: String,
     responded: bool,
@@ -70,8 +67,6 @@ struct InFlight {
 #[derive(Debug, Default)]
 pub struct Tracker {
     next: u64,
-    /// Main-frame loads started so far.
-    generation: u64,
     /// The last main-frame navigation action, `(url, method)`: the method the
     /// load it leads to is sent with (a form's POST).
     last_action: Option<(String, String)>,
@@ -83,7 +78,6 @@ impl Tracker {
     pub const fn new() -> Self {
         Tracker {
             next: 0,
-            generation: 0,
             last_action: None,
             main: None,
             frames: Vec::new(),
@@ -169,7 +163,6 @@ impl Tracker {
             loader_id: self.id("loader"),
             request_id,
             navigation: 0,
-            generation: self.generation,
             url: url.to_string(),
             responded: false,
         };
@@ -192,13 +185,11 @@ impl Tracker {
                 events.push(Self::closed(open, "superseded by a newer navigation", true));
             }
         }
-        self.generation += 1;
         let request = InFlight {
             request_id: self.id("req"),
             loader_id: self.id("loader"),
             frame_id: MAIN_FRAME.to_string(),
             navigation,
-            generation: self.generation,
             url: url.to_string(),
             responded: false,
         };
@@ -262,7 +253,6 @@ impl Tracker {
                         format!("frame-{}", self.next)
                     },
                     navigation: 0,
-                    generation: self.generation,
                     url: response.url.clone(),
                     responded: false,
                 };
@@ -310,20 +300,16 @@ impl Tracker {
         events
     }
 
-    /// The main frame's document committed: `didCommitNavigation`. The iframes
-    /// of the document before it are gone, answered or not.
+    /// The main frame's document committed: `didCommitNavigation`. Every iframe
+    /// the log holds belongs to the document this replaces: WebKit reports a new
+    /// document's iframes only after its commit, so they are all gone now.
     pub fn commit(&mut self, url: &str) -> Vec<Event> {
-        let current = self.generation;
         let mut events = Vec::new();
-        self.frames.retain(|f| {
-            if f.generation >= current {
-                return true;
-            }
+        for f in self.frames.drain(..) {
             if !f.responded {
-                events.push(Self::closed(f, NO_FRAME_RESPONSE, true));
+                events.push(Self::closed(&f, NO_FRAME_RESPONSE, true));
             }
-            false
-        });
+        }
         let loader_id = match &self.main {
             Some(m) => m.loader_id.clone(),
             None => self.id("loader"),
@@ -515,8 +501,8 @@ mod tests {
         let mut t = Tracker::default();
         t.started(A, "http://h/one");
         let old = t.action("http://ad/old", "GET", false);
+        // A load of the new document starts; its iframes are not reported yet.
         t.started(B, "http://h/two");
-        let new = t.action("http://ad/new", "GET", false);
         let commit = t.commit("http://h/two");
         assert_eq!(
             names(&commit),
@@ -524,6 +510,9 @@ mod tests {
         );
         assert_eq!(id(&commit[0]), id(&old[0]));
         assert_eq!(commit[0].params["alreadyRecorded"], true);
+        assert!(t.frames.is_empty());
+        // The new document's iframes come after its commit, and are kept.
+        let new = t.action("http://ad/new", "GET", false);
         assert_eq!(t.frames.len(), 1);
         assert_eq!(t.frames[0].request_id, id(&new[0]));
     }
