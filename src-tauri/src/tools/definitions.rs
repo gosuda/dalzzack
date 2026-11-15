@@ -4730,7 +4730,7 @@ function can(el, axis) {
 function rootCan(axis) {
   var h = getComputedStyle(document.documentElement);
   var vp = (h.overflowX === 'visible' && h.overflowY === 'visible' && document.body) ? getComputedStyle(document.body) : h;
-  if ((axis === 'x' ? vp.overflowX : vp.overflowY) === 'hidden') { return false; }
+  if (/^(hidden|clip)$/.test(axis === 'x' ? vp.overflowX : vp.overflowY)) { return false; }
   return axis === 'x' ? root.scrollWidth - root.clientWidth > 1 : root.scrollHeight - root.clientHeight > 1;
 }
 // Is there still room to scroll `el` the way `sign` says (-1 toward the start, 1 toward the end)?
@@ -4760,9 +4760,11 @@ function scrollables(limit) {
 }
 function pick(axis, sign) {
   // The window, while it can still move that way; then what is under the middle of the
-  // viewport; then the biggest scroller; the window again if nothing else can.
+  // viewport; then the biggest scroller; the window again if nothing else can. An absolute
+  // move (`--to`) keeps the window whenever it can scroll at all, so asking for the bottom
+  // twice never ends up in a sidebar.
   var windowCan = rootCan(axis);
-  if (windowCan && room(root, axis, sign)) { return root; }
+  if (windowCan && (TO || room(root, axis, sign))) { return root; }
   var at = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
   for (var n = at; n && n !== document.documentElement; n = n.parentElement) {
     if (can(n, axis) && !isRoot(n)) { return n; }
@@ -4796,6 +4798,7 @@ if (!el) {
     scrollables: scrollables(5) };
 }
 var win = isRoot(el);
+var handedOver = SEL === null && !win && rootCan(axis) && !room(root, axis, sign);
 function pos() { return win ? { x: window.scrollX, y: window.scrollY } : { x: el.scrollLeft, y: el.scrollTop }; }
 var before = pos();
 if (TO) {
@@ -4824,6 +4827,7 @@ var out = { status: 'completed', moved: moved, container: name(el),
   scrolled: { dx: after.x - before.x, dy: after.y - before.y },
   at_start: atStart, at_end: atEnd };
 if (TO) { out.to = TO; } else { out.requested = { dx: DX, dy: DY }; }
+if (handedOver) { out.note = 'The window is already at its end that way, so this scrolled ' + name(el) + '.'; }
 if (win) {
   out.scrollX = after.x; out.scrollY = after.y; out.pageHeight = sh; out.viewportHeight = innerHeight;
 } else {
