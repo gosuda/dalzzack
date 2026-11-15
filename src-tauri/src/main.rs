@@ -187,10 +187,10 @@ enum Cli {
         /// Instance ID of the running daemon
         #[arg(long, short, default_value = "")]
         id: String,
-        /// New PAGE width in pixels (>= 100)
+        /// New PAGE width in pixels (>= 100; the page stays at 320 or more)
         #[arg(long)]
         width: u32,
-        /// New PAGE height in pixels (>= 100)
+        /// New PAGE height in pixels (>= 100; the page stays at 200 or more)
         #[arg(long)]
         height: u32,
     },
@@ -536,7 +536,7 @@ enum Cli {
         click_type: String,
     },
 
-    /// Scroll what a mouse wheel would, or a specific element. The result says whether
+    /// Scroll the element that really scrolls, or a specific one. The result says whether
     /// anything `moved`, by how much (`scrolled`), and which `container` scrolled.
     /// Use --to for absolute positioning, or --direction + --amount for relative.
     /// Example: --to bottom --selector ".chat-container"
@@ -551,8 +551,8 @@ enum Cli {
         /// Scroll amount in pixels (default: 500)
         #[arg(long, default_value = "500", alias = "pixels")]
         amount: i32,
-        /// CSS selector to scroll within (default: what a mouse wheel would scroll: the
-        /// window, or the page's inner scroller when the window cannot scroll)
+        /// CSS selector to scroll within (default: the window while it can still move that
+        /// way, else the scroller under the middle of the page)
         #[arg(long)]
         selector: Option<String>,
         /// Scroll to absolute position: top, bottom, left-end, right-end (overrides --direction/--amount)
@@ -3060,11 +3060,16 @@ mod tests {
                     && message.contains("--script"),
                 "{message}"
             );
-            // An error clap has no suggestion for stays one line.
-            let e = Args::try_parse_from(["dalzzack", "no-such-command"])
+            // An error clap has no suggestion for gets no tip, and no stray second line.
+            let e = Args::try_parse_from(["dalzzack", "exec-js", "--no-such-flag-at-all-zzz"])
                 .err()
                 .unwrap();
-            assert!(!usage_message(&e).contains('\n'));
+            let message = usage_message(&e);
+            assert!(message.contains("unexpected argument"), "{message}");
+            assert!(
+                !message.contains("tip:") && !message.contains('\n'),
+                "{message}"
+            );
         });
     }
 

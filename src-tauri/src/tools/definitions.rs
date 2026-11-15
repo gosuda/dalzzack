@@ -492,7 +492,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 
         ToolDefinition {
             name: "scroll".to_string(),
-            description: "Scroll what a mouse wheel would: the window, or the page's inner scroller when the window cannot scroll. Use `to` for absolute positions (top/bottom/left-end/right-end), or `direction` + `amount` for relative scrolling. Reports `moved`, the measured `scrolled`, and the `container` it scrolled.".to_string(),
+            description: "Scroll the element that really scrolls: the window while it can still move that way, else the scrollable element under the middle of the page, else the largest scroller. Use `to` for absolute positions (top/bottom/left-end/right-end), or `direction` + `amount` for relative scrolling. Reports `moved`, the measured `scrolled`, and the `container` it scrolled.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -500,7 +500,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "to": { "type": "string", "enum": ["top", "bottom", "left-end", "right-end"], "description": "Absolute scroll target. Mutually exclusive with direction/amount." },
                     "direction": { "type": "string", "enum": ["up", "down", "left", "right"], "description": "Relative scroll direction (default: down)." },
                     "amount": { "type": "integer", "description": "Pixels to scroll for relative mode (default 500)." },
-                    "selector": { "type": "string", "description": "CSS selector of a scrollable container; always wins. Omit to scroll what a mouse wheel would." }
+                    "selector": { "type": "string", "description": "CSS selector of a scrollable container; always wins. Omit to let scroll find the element that really scrolls." }
                 }
             }),
         },
@@ -550,13 +550,13 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 
         ToolDefinition {
             name: "resize_window".to_string(),
-            description: "Resize the browser window of a running daemon. Minimum 100×100. Useful for responsive testing or fitting the viewport to a target layout.".to_string(),
+            description: "Resize the browser window of a running daemon. The page can be as small as 320×200: a smaller size is accepted from 100×100 and the result reports the size the window really took (`exact`, `note`). Useful for responsive testing or fitting the viewport to a target layout.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "site": site_param(),
-                    "width": { "type": "integer", "description": "New PAGE width in pixels (>= 100); the window is taller by its toolbar." },
-                    "height": { "type": "integer", "description": "New PAGE height in pixels (>= 100); the window is taller by its toolbar." }
+                    "width": { "type": "integer", "description": "New PAGE width in pixels (>= 100; the window keeps the page at 320 or more); the window is taller by its toolbar." },
+                    "height": { "type": "integer", "description": "New PAGE height in pixels (>= 100; the window keeps the page at 200 or more); the window is taller by its toolbar." }
                 },
                 "required": ["width", "height"]
             }),
@@ -4707,21 +4707,39 @@ async fn tool_click(args: &Value) -> Result<Value> {
 /// What the page runs for `scroll`. The arguments arrive as the four `var`s the
 /// caller puts in front of it (as JSON, never pasted into a quoted string).
 ///
-/// The target is what a mouse wheel would scroll: the window if it can scroll,
+/// The target: the window while it can still move that way (and is not locked),
 /// else the scrollable ancestor of the element at the middle of the viewport
 /// (a documentation site whose text scrolls inside `#page`), else the largest
 /// scrollable element. An explicit selector always wins. The answer is measured,
 /// not echoed: `moved` says whether anything moved, and `scrolled` by how much.
 const SCROLL_JS: &str = r##"
 var root = document.scrollingElement || document.documentElement;
-function isRoot(el) { return el === root || el === document.documentElement || el === document.body; }
+// The body is the window, unless the page gave the body its own scrolling (an overflow on <html>).
+function bodyOwn() {
+  var h = getComputedStyle(document.documentElement);
+  return h.overflowX !== 'visible' || h.overflowY !== 'visible';
+}
+function isRoot(el) { return el === root || el === document.documentElement || (el === document.body && !bodyOwn()); }
 function can(el, axis) {
   var cs = getComputedStyle(el);
   if (axis === 'x') { return /(auto|scroll|overlay)/.test(cs.overflowX) && el.scrollWidth - el.clientWidth > 1; }
   return /(auto|scroll|overlay)/.test(cs.overflowY) && el.scrollHeight - el.clientHeight > 1;
 }
+// Can the window scroll along `axis`, and is it allowed to? A page that locks its scroll
+// (overflow hidden on the viewport, as behind a modal) is not one.
 function rootCan(axis) {
+  var h = getComputedStyle(document.documentElement);
+  var vp = (h.overflowX === 'visible' && h.overflowY === 'visible' && document.body) ? getComputedStyle(document.body) : h;
+  if ((axis === 'x' ? vp.overflowX : vp.overflowY) === 'hidden') { return false; }
   return axis === 'x' ? root.scrollWidth - root.clientWidth > 1 : root.scrollHeight - root.clientHeight > 1;
+}
+// Is there still room to scroll `el` the way `sign` says (-1 toward the start, 1 toward the end)?
+function room(el, axis, sign) {
+  var win = isRoot(el);
+  var at = axis === 'x' ? (win ? window.scrollX : el.scrollLeft) : (win ? window.scrollY : el.scrollTop);
+  var size = axis === 'x' ? (win ? root.clientWidth : el.clientWidth) : (win ? root.clientHeight : el.clientHeight);
+  var total = axis === 'x' ? (win ? root.scrollWidth : el.scrollWidth) : (win ? root.scrollHeight : el.scrollHeight);
+  return sign < 0 ? at > 0 : at + size < total - 1;
 }
 function name(el) {
   if (isRoot(el)) { return 'window'; }
@@ -4740,36 +4758,42 @@ function scrollables(limit) {
   }
   return out;
 }
-function pick(axis) {
-  if (rootCan(axis)) { return root; }
+function pick(axis, sign) {
+  // The window, while it can still move that way; then what is under the middle of the
+  // viewport; then the biggest scroller; the window again if nothing else can.
+  var windowCan = rootCan(axis);
+  if (windowCan && room(root, axis, sign)) { return root; }
   var at = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
   for (var n = at; n && n !== document.documentElement; n = n.parentElement) {
-    if (can(n, axis)) { return n; }
+    if (can(n, axis) && !isRoot(n)) { return n; }
   }
   var best = null, bestArea = 0, all = document.querySelectorAll('*'), cap = Math.min(all.length, 6000);
   for (var i = 0; i < cap; i++) {
     var el = all[i];
-    if (!can(el, axis)) { continue; }
+    if (!can(el, axis) || isRoot(el)) { continue; }
     var r = el.getBoundingClientRect();
     var w = Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0));
     var h = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
     if (w * h > bestArea) { best = el; bestArea = w * h; }
   }
-  return best;
+  return best || (windowCan ? root : null);
 }
 var axis = 'y';
 if (TO) { axis = (TO === 'left-end' || TO === 'right-end') ? 'x' : 'y'; }
 else if (DY === 0 && DX !== 0) { axis = 'x'; }
+var sign = TO ? ((TO === 'top' || TO === 'left-end') ? -1 : 1) : (axis === 'y' ? (DY < 0 ? -1 : 1) : (DX < 0 ? -1 : 1));
 var el;
 if (SEL !== null) {
   el = document.querySelector(SEL);
   if (!el) { return { status: 'failed', error: 'Selector not found: ' + SEL, scrollables: scrollables(5) }; }
 } else {
-  el = pick(axis);
+  el = pick(axis, sign);
 }
 if (!el) {
+  var frames = document.querySelectorAll('iframe, frame').length;
   return { status: 'completed', moved: false, container: null,
-    hint: 'Nothing on this page can scroll along that axis.', scrollables: [] };
+    hint: 'Nothing in this document can scroll along that axis.' + (frames ? ' It has ' + frames + ' iframe(s); scroll acts on this document and does not enter an iframe.' : ''),
+    scrollables: scrollables(5) };
 }
 var win = isRoot(el);
 function pos() { return win ? { x: window.scrollX, y: window.scrollY } : { x: el.scrollLeft, y: el.scrollTop }; }
@@ -4781,7 +4805,7 @@ if (TO) {
   else if (TO === 'left-end') { tx = 0; }
   else if (TO === 'right-end') { tx = win ? root.scrollWidth : el.scrollWidth; }
   if (win) { window.scrollTo({ left: tx, top: ty, behavior: 'instant' }); }
-  else { el.scrollTop = ty; el.scrollLeft = tx; }
+  else { el.scrollTo({ left: tx, top: ty, behavior: 'instant' }); }
 } else if (win) {
   window.scrollBy({ left: DX, top: DY, behavior: 'instant' });
 } else {
@@ -4791,7 +4815,7 @@ if (TO) {
   if (mid.x === before.x && DX !== 0) { el.scrollLeft = before.x + DX; }
 }
 var after = pos();
-var cw = win ? innerWidth : el.clientWidth, ch = win ? innerHeight : el.clientHeight;
+var cw = win ? root.clientWidth : el.clientWidth, ch = win ? root.clientHeight : el.clientHeight;
 var sw = win ? root.scrollWidth : el.scrollWidth, sh = win ? root.scrollHeight : el.scrollHeight;
 var moved = after.x !== before.x || after.y !== before.y;
 var atStart = axis === 'y' ? after.y <= 0 : after.x <= 0;
@@ -4830,7 +4854,7 @@ fn scroll_script(selector: Option<&str>, to: Option<&str>, dx: i64, dy: i64) -> 
     )
 }
 
-/// scroll — the page, or what a mouse wheel would scroll on it, or one container.
+/// scroll — the element that really scrolls, or one container.
 async fn tool_scroll(args: &Value) -> Result<Value> {
     let direction = args["direction"].as_str().unwrap_or("down");
     let amount = args["amount"].as_i64().unwrap_or(500);

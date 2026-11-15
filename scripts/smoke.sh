@@ -200,6 +200,44 @@ d = json.load(sys.stdin)
 if d.get("status") != "completed" or d.get("moved") is not False:
     raise SystemExit(f"FAIL: a selector with a quote should run and report moved=false: {d}")
 '
+# The pages that fooled a simpler pick. Each is a data: URL, so no `#` (it would start a fragment).
+scroll_case() { # name, html, expected container, expected dy of the first scroll
+  local url
+  url=$(NAME="$1" HTML="$2" python3 -c '
+import base64, os
+print("data:text/html;base64," + base64.b64encode(os.environ["HTML"].encode()).decode())
+')
+  dalzzack navigate -i "$ID" --url "$url" >/dev/null
+  dalzzack scroll -i "$ID" --amount 300 | EXPECT="$3" DY="$4" NAME="$1" python3 -c '
+import json, os, sys
+d = json.load(sys.stdin)
+want, dy, name = os.environ["EXPECT"], int(os.environ["DY"]), os.environ["NAME"]
+if not (d.get("moved") is True and d.get("container") == want and d["scrolled"]["dy"] == dy):
+    raise SystemExit(f"FAIL: {name}: expected {want} to move {dy}: {d}")
+print("scroll:", name, "->", d["container"], d["scrolled"]["dy"])
+'
+}
+TALL='<div style="height:3000px">x</div>'
+scroll_case "a body that scrolls on its own" \
+  "<style>html{overflow:hidden;height:100%}body{margin:0;height:100%;overflow:auto}</style>$TALL" body 300
+scroll_case "a window with 16px to spare, then an inner scroller" \
+  "<style>body{margin:8px}</style><div id=app style='height:100vh;overflow:auto'>$TALL</div>" window 16
+# The second call finds the window at its end and moves the inner scroller instead of reporting a stall.
+dalzzack scroll -i "$ID" --amount 300 | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if not (d.get("moved") is True and d.get("container") == "#app" and d["scrolled"]["dy"] == 300):
+    raise SystemExit(f"FAIL: with the window at its end, #app should scroll: {d}")
+'
+scroll_case "a container with scroll-behavior: smooth" \
+  "<div id=a style='height:300px;overflow:auto;scroll-behavior:smooth'>$TALL</div>" "#a" 300
+dalzzack scroll -i "$ID" --to bottom | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+# It was already 300 down, so the move is the other 2400 and it ends at 2700.
+if not (d.get("moved") is True and d.get("at_end") is True and d["scrolled"]["dy"] == 2400 and d["scrollTop"] == 2700):
+    raise SystemExit(f"FAIL: --to bottom on a smooth container should measure the real move: {d}")
+'
 
 step "screencast records a scroll as an mp4"
 # Needs ffmpeg to encode (skipped without it) and a screencast source for this
@@ -287,6 +325,56 @@ print("nav-log: redirect chain, challenge and 404 seen; source =", d.get("source
 '
 else
   echo "node is not installed: skipping the nav-log fixture check"
+fi
+
+step "nav-log joins a redirect after a click or a POST; a fragment link is no hop"
+# A redirect arrives with the navigation type of what started it (a link, a
+# form) and a fragment link is decided but never loads, so only the redirect
+# callback may say what is a hop. A slow load replaced before it answered must
+# keep its own entry and not swallow the next.
+if [ -n "${FIXTURE_PID:-}" ]; then
+  B="http://127.0.0.1:$FIXTURE_PORT"
+  dalzzack exec-js -i "$ID" --code "location.href='$B/slow'; return 1" >/dev/null
+  sleep 0.5
+  dalzzack navigate -i "$ID" --url "$B/page2" >/dev/null
+  dalzzack navigate -i "$ID" --url "$B/links" >/dev/null
+  dalzzack click -i "$ID" --selector '#redirect' >/dev/null
+  dalzzack wait-for-condition -i "$ID" --script "return document.title === 'Page 2'" --timeout-ms 10000 >/dev/null
+  dalzzack navigate -i "$ID" --url "$B/links" >/dev/null
+  dalzzack click -i "$ID" --selector '#post' >/dev/null
+  dalzzack wait-for-condition -i "$ID" --script "return document.title === 'Done'" --timeout-ms 10000 >/dev/null
+  dalzzack navigate -i "$ID" --url "$B/links" >/dev/null
+  dalzzack click -i "$ID" --selector '#fragment' >/dev/null
+  sleep 0.5
+  dalzzack navigate -i "$ID" --url "$B/tabs" >/dev/null
+  # Past the slow page's own answer, which must land nowhere.
+  sleep 3
+  dalzzack nav-log -i "$ID" --max 30 | FIXTURE_PORT="$FIXTURE_PORT" python3 -c '
+import json, os, sys
+b = "http://127.0.0.1:" + os.environ["FIXTURE_PORT"]
+navs = [n for n in json.load(sys.stdin)["navigations"] if n.get("main_frame")]
+def last(path):
+    hits = [n for n in navs if n.get("requested_url") == b + path]
+    if not hits:
+        seen = [n.get("requested_url") for n in navs]
+        raise SystemExit(f"FAIL: no navigation to {path}: {seen}")
+    return hits[-1]
+link = last("/r302")
+if link["redirects"] != 1 or link.get("final_url") != b + "/page2" or link["status"] != 200:
+    raise SystemExit(f"FAIL: a link into a 302 should be one chain ending in /page2 200: {link}")
+post = last("/submit")
+if post["method"] != "POST" or post["redirects"] != 1 or post.get("final_url") != b + "/done":
+    raise SystemExit(f"FAIL: a POST answered by 303 should be one chain ending in /done: {post}")
+slow = last("/slow")
+if slow["status"] is not None or slow["redirects"] != 0:
+    raise SystemExit(f"FAIL: the replaced slow load should end without an answer: {slow}")
+tabs = last("/tabs")
+if tabs["redirects"] != 0 or tabs["status"] != 200:
+    raise SystemExit(f"FAIL: a navigation after a fragment link should be a request of its own: {tabs}")
+if any("#end" in (h.get("url") or "") for n in navs for h in n.get("hops", [])):
+    raise SystemExit("FAIL: the fragment link should not appear as a hop")
+print("nav-log: link and POST redirects are chains, a fragment link is no hop, a replaced load stays apart")
+'
 fi
 
 step "stop daemon"

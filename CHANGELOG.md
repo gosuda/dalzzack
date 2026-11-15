@@ -8,12 +8,16 @@ All notable changes to dalzzack. The format loosely follows
 
 ### Added
 
-- `scroll` finds what a mouse wheel would scroll: the window, or the page's inner
-  scroller when the window cannot scroll (a documentation site whose text scrolls
-  inside `#page`). Its answer is measured: `moved`, `scrolled` (the real distance),
-  `requested`, `container`, `at_start`, `at_end`, and a `hint` plus `scrollables`
-  when nothing moved. `--selector` always wins. `--to left-end|right-end` are now in
-  the help.
+- `scroll` finds the element that really scrolls: the window while it can still
+  move that way, else the scrollable element under the middle of the page (a
+  documentation site whose text scrolls inside `#page`), else the largest scroller.
+  A page that locks its window scroll is not scrolled through the window, and a
+  `<body>` that scrolls on its own is scrolled as an element. Its answer is
+  measured: `moved`, `scrolled` (the real distance), `requested`, `container`,
+  `at_start`, `at_end`, and a `hint` plus (without `--selector`) `scrollables` when
+  nothing moved. `--selector` always wins; `element` and `container` now name the
+  element as `#id` or `tag.class` (not the selector you passed). `--to left-end|
+  right-end` are now in the help.
 - `start` and `resize` report the size the page really got (`size`/`viewport`,
   `exact`, and a `note` when the window limited it), read natively from the page's
   webview. The narrowest window is now 320 px wide (it was 400), so phone widths

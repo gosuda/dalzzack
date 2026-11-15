@@ -59,8 +59,8 @@ All commands except `start`, `stop`, `list`, `run`, `guide`, `install`, `tools`,
 | `keyboard --text "hello" [--paste]` | Type character-by-character, or paste at once |
 | `keyboard --key Enter [--modifiers ctrl,shift]` | Press special keys |
 | `keyboard --key Tab --native` | Press a named key as a native key event: an `NSEvent` sent to the WebView's window on macOS, CDP `Input.dispatchKeyEvent` on Windows WebView2 (not on Linux). The page gets `isTrusted: true`, and focus crosses cross-origin iframes and closed shadow roots (Tab, then Space, ticks a Cloudflare Turnstile checkbox). No Accessibility permission; the mouse does not move. Not with `--text` |
-| `scroll --to top\|bottom\|left-end\|right-end [--selector CSS]` | Absolute scroll. Scrolls what a mouse wheel would: the window, or the page's inner scroller when the window cannot scroll. `--selector` always wins. Reports `moved`, `container`, `at_start`/`at_end` |
-| `scroll [--direction down] [--amount 500] [--selector CSS]` | Relative scroll. `scrolled` is the measured distance and `requested` the asked one; when nothing moved, `hint` says why and `scrollables` lists what can scroll |
+| `scroll --to top\|bottom\|left-end\|right-end [--selector CSS]` | Absolute scroll. Scrolls the element that really scrolls: the window while it can still move that way, else the scroller under the middle of the page. `--selector` always wins. Reports `moved`, `container`, `at_start`/`at_end` |
+| `scroll [--direction down] [--amount 500] [--selector CSS]` | Relative scroll. `scrolled` is the measured distance and `requested` the asked one; when nothing moved, `hint` says why and, without `--selector`, `scrollables` lists what can scroll; `container` names the element that scrolled (`#page`, `div.a.b`, `window`) |
 | `upload-file --selector "input[type=file]" --file PATH` | Upload file (max 50 MB) |
 | `save-image --selector CSS --output PATH [--index -1]` | Save DOM `<img>` to disk |
 

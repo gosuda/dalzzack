@@ -26,10 +26,19 @@ pub fn page_viewport(window: &WebviewWindow) -> Option<(f64, f64)> {
     Some((size.width, (size.height - under_title_bar).max(0.0)))
 }
 
-/// [`page_viewport`] of the daemon's own window.
+/// [`page_viewport`] of the daemon's own window, for `__ping`.
+///
+/// The read waits for the main thread, and a ping must answer from the daemon's
+/// own memory: a stalled window (a modal dialog, a live resize) must not make a
+/// healthy daemon look dead. So the read gets half a second, and a stalled one is
+/// left to finish on its own thread with its answer dropped.
 pub async fn current() -> Option<(f64, f64)> {
     let window = crate::state::get_main_window().await?;
-    page_viewport(&window)
+    let read = tokio::task::spawn_blocking(move || page_viewport(&window));
+    tokio::time::timeout(std::time::Duration::from_millis(500), read)
+        .await
+        .ok()?
+        .ok()?
 }
 
 /// What a size request came to: the size asked for, the page's size now, and
