@@ -15,6 +15,9 @@
  *   /form        input + button recording event.isTrusted
  *   /frames      a cross-site (localhost) and a same-site iframe
  *   /hang        never answers
+ *   /slow        answers after 3 s
+ *   /links       a link to /r302 (302 → /page2), a form that POSTs to
+ *                /submit (303 → /done), and a fragment link to #end
  */
 import { createServer } from "http";
 
@@ -52,6 +55,31 @@ createServer((req, res) => {
       );
     }
     return html(`<!doctype html><title>Through</title><p>through</p>`);
+  }
+  if (p === "/slow") {
+    setTimeout(() => html(`<!doctype html><title>Slow</title><p>slow</p>`), 3000);
+    return;
+  }
+  if (p === "/links") {
+    return html(
+      `<!doctype html><title>Links</title><a id=redirect href="/r302">redirect</a>
+<form method=post action="/submit"><input name=q value=1><button id=post>post</button></form>
+<a id=fragment href="#end">fragment</a><div style="height:3000px"></div><p id=end>end</p>`,
+    );
+  }
+  if (p === "/r302") {
+    res.writeHead(302, { Location: "/page2" });
+    return res.end();
+  }
+  if (p === "/page2") {
+    return html(`<!doctype html><title>Page 2</title><p>two</p>`);
+  }
+  if (p === "/submit") {
+    res.writeHead(303, { Location: "/done" });
+    return res.end();
+  }
+  if (p === "/done") {
+    return html(`<!doctype html><title>Done</title><p>done</p>`);
   }
   if (p === "/hang") {
     // Never answers: what a stalled origin looks like to the browser.

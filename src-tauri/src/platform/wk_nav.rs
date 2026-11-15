@@ -1,34 +1,41 @@
 //! macOS: the navigation log's source. It wraps two methods of wry's WKWebView
-//! navigation delegate, to see each navigation that starts and each response
+//! navigation delegate, to see each navigation that is decided and each response
 //! that comes back, and always calls the method it wrapped, so wry (and the
-//! `on_navigation` it serves) behaves exactly as before. What the delegate says
-//! goes through [`crate::webkit_nav`], which turns it into the events
-//! [`crate::netlog`] reads.
+//! `on_navigation` it serves) behaves exactly as before. It also adds the two
+//! callbacks that say a main-frame load started and that a server redirected it
+//! (wry has neither), which carry the `WKNavigation` the failure callback later
+//! names. What the delegate says goes through [`crate::webkit_nav`], which turns
+//! it into the events [`crate::netlog`] reads.
 //!
 //! No page JavaScript is involved: this is the browser telling its host about
 //! navigations, and the page cannot observe it.
 //!
-//! The wrapping is the fragile part, since it relies on wry's delegate having
-//! those two methods. [`install`] checks that both took effect and only then
-//! arms the log; otherwise `nav-log` says it is unavailable instead of showing
-//! an empty timeline that would read as "nothing navigated".
+//! The hooking is the fragile part, since it relies on wry's delegate having the
+//! two policy methods. [`install`] checks that every hook took effect and only
+//! then arms the log; otherwise `nav-log` says it is unavailable instead of
+//! showing an empty timeline that would read as "nothing navigated".
 
 use crate::webkit_nav::{Event, Response, Tracker};
 use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
 use objc2::{class, msg_send, sel};
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+static INSTALLED: AtomicBool = AtomicBool::new(false);
 static ORIGINAL_ACTION: AtomicUsize = AtomicUsize::new(0);
 static ORIGINAL_RESPONSE: AtomicUsize = AtomicUsize::new(0);
+/// The delegate's own `didStartProvisionalNavigation` / server-redirect
+/// methods, if a later wry has them: called after ours. `0` when we added them.
+static ORIGINAL_STARTED: AtomicUsize = AtomicUsize::new(0);
+static ORIGINAL_REDIRECTED: AtomicUsize = AtomicUsize::new(0);
 /// The page's WKWebView. The toolbar's webview shares the delegate class and is
 /// not part of the log.
 static PAGE: AtomicUsize = AtomicUsize::new(0);
 static TRACKER: Mutex<Tracker> = Mutex::new(Tracker::new());
 
-/// The signature of both wrapped methods:
+/// The signature of both policy methods:
 /// `(self, _cmd, webView, navigationAction | navigationResponse, decisionHandler)`.
 type PolicyFn = unsafe extern "C-unwind" fn(
     *mut AnyObject,
@@ -38,6 +45,11 @@ type PolicyFn = unsafe extern "C-unwind" fn(
     *mut AnyObject,
 );
 
+/// The signature of `webView:didStartProvisionalNavigation:` and
+/// `webView:didReceiveServerRedirectForProvisionalNavigation:`.
+type NavigationFn =
+    unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject);
+
 fn feed(step: impl FnOnce(&mut Tracker) -> Vec<Event>) {
     let events = {
         let mut tracker = TRACKER.lock().unwrap_or_else(|e| e.into_inner());
@@ -46,6 +58,11 @@ fn feed(step: impl FnOnce(&mut Tracker) -> Vec<Event>) {
     for event in events {
         crate::netlog::ingest(event.name, &event.params);
     }
+}
+
+fn is_page(webview: *mut AnyObject) -> bool {
+    let page = PAGE.load(Ordering::SeqCst);
+    page != 0 && webview as usize == page
 }
 
 /// The page's document committed (Tauri's page-load `Started`).
@@ -63,9 +80,15 @@ pub fn page_finished() {
 }
 
 /// A main-frame load failed (the delegate's own failure callback saw it).
-pub fn load_failed(error: &str, canceled: bool) {
-    if PAGE.load(Ordering::SeqCst) != 0 {
-        feed(|t| t.failed(error, canceled));
+pub fn load_failed(
+    webview: *mut AnyObject,
+    navigation: *mut AnyObject,
+    error: &str,
+    canceled: bool,
+) {
+    if is_page(webview) {
+        tracing::debug!("[wk-nav] failed {navigation:?} canceled={canceled}: {error}");
+        feed(|t| t.failed(navigation as usize, error, canceled));
     }
 }
 
@@ -82,6 +105,13 @@ unsafe fn text(obj: *mut AnyObject) -> Option<String> {
     is_string
         .then(|| super::wk_delegate::ns_string(obj))
         .flatten()
+}
+
+unsafe fn url_text(url: *mut AnyObject) -> Option<String> {
+    if url.is_null() {
+        return None;
+    }
+    text(msg_send![url, absoluteString])
 }
 
 /// An `NSDictionary` of strings, as a map. Other keys and values are skipped.
@@ -103,15 +133,14 @@ unsafe fn string_pairs(dict: *mut AnyObject) -> BTreeMap<String, String> {
 }
 
 unsafe fn on_action(webview: *mut AnyObject, action: *mut AnyObject) {
-    if webview as usize != PAGE.load(Ordering::SeqCst) {
+    if !is_page(webview) {
         return;
     }
     let request: *mut AnyObject = msg_send![action, request];
     if request.is_null() {
         return;
     }
-    let url_object: *mut AnyObject = msg_send![request, URL];
-    let Some(url) = text(msg_send![url_object, absoluteString]).filter(|u| is_logged(u)) else {
+    let Some(url) = url_text(msg_send![request, URL]).filter(|u| is_logged(u)) else {
         return;
     };
     let method = text(msg_send![request, HTTPMethod]).unwrap_or_else(|| "GET".to_string());
@@ -122,19 +151,19 @@ unsafe fn on_action(webview: *mut AnyObject, action: *mut AnyObject) {
     }
     let main: bool = msg_send![target, isMainFrame];
     let kind: isize = msg_send![action, navigationType];
-    feed(|t| t.action(&url, &method, main, target as usize, kind as i64));
+    tracing::debug!("[wk-nav] action main={main} type={kind} {method} {url}");
+    feed(|t| t.action(&url, &method, main));
 }
 
 unsafe fn on_response(webview: *mut AnyObject, navigation_response: *mut AnyObject) {
-    if webview as usize != PAGE.load(Ordering::SeqCst) {
+    if !is_page(webview) {
         return;
     }
     let response: *mut AnyObject = msg_send![navigation_response, response];
     if response.is_null() {
         return;
     }
-    let url_object: *mut AnyObject = msg_send![response, URL];
-    let Some(url) = text(msg_send![url_object, absoluteString]).filter(|u| is_logged(u)) else {
+    let Some(url) = url_text(msg_send![response, URL]).filter(|u| is_logged(u)) else {
         return;
     };
     let main: bool = msg_send![navigation_response, isForMainFrame];
@@ -143,12 +172,13 @@ unsafe fn on_response(webview: *mut AnyObject, navigation_response: *mut AnyObje
     let (status, headers) = if is_http {
         let status: isize = msg_send![response, statusCode];
         (
-            status as i64,
+            Some(status as i64),
             string_pairs(msg_send![response, allHeaderFields]),
         )
     } else {
-        (0, BTreeMap::new())
+        (None, BTreeMap::new())
     };
+    tracing::debug!("[wk-nav] response main={main} {status:?} {url}");
     let parsed = Response {
         url,
         status,
@@ -156,6 +186,30 @@ unsafe fn on_response(webview: *mut AnyObject, navigation_response: *mut AnyObje
         headers,
     };
     feed(|t| t.response(&parsed, main));
+}
+
+/// Where the page's load is now: `WKWebView.URL`, which WebKit moves to the
+/// provisional URL when a load starts and to the new one on a redirect.
+unsafe fn page_url(webview: *mut AnyObject) -> Option<String> {
+    url_text(msg_send![webview, URL]).filter(|u| is_logged(u))
+}
+
+unsafe fn on_started(webview: *mut AnyObject, navigation: *mut AnyObject) {
+    if !is_page(webview) {
+        return;
+    }
+    let Some(url) = page_url(webview) else { return };
+    tracing::debug!("[wk-nav] started {navigation:?} {url}");
+    feed(|t| t.started(navigation as usize, &url));
+}
+
+unsafe fn on_redirected(webview: *mut AnyObject, navigation: *mut AnyObject) {
+    if !is_page(webview) {
+        return;
+    }
+    let Some(url) = page_url(webview) else { return };
+    tracing::debug!("[wk-nav] redirected {navigation:?} {url}");
+    feed(|t| t.redirected(navigation as usize, &url));
 }
 
 unsafe extern "C-unwind" fn decide_action(
@@ -166,7 +220,7 @@ unsafe extern "C-unwind" fn decide_action(
     handler: *mut AnyObject,
 ) {
     let _ = catch_unwind(AssertUnwindSafe(|| on_action(webview, action)));
-    call_original(&ORIGINAL_ACTION, this, cmd, webview, action, handler);
+    call_policy(&ORIGINAL_ACTION, this, cmd, webview, action, handler);
 }
 
 unsafe extern "C-unwind" fn decide_response(
@@ -177,11 +231,31 @@ unsafe extern "C-unwind" fn decide_response(
     handler: *mut AnyObject,
 ) {
     let _ = catch_unwind(AssertUnwindSafe(|| on_response(webview, response)));
-    call_original(&ORIGINAL_RESPONSE, this, cmd, webview, response, handler);
+    call_policy(&ORIGINAL_RESPONSE, this, cmd, webview, response, handler);
 }
 
-/// wry's own method, which decides what happens to the navigation.
-unsafe fn call_original(
+unsafe extern "C-unwind" fn did_start(
+    this: *mut AnyObject,
+    cmd: Sel,
+    webview: *mut AnyObject,
+    navigation: *mut AnyObject,
+) {
+    let _ = catch_unwind(AssertUnwindSafe(|| on_started(webview, navigation)));
+    call_navigation(&ORIGINAL_STARTED, this, cmd, webview, navigation);
+}
+
+unsafe extern "C-unwind" fn did_redirect(
+    this: *mut AnyObject,
+    cmd: Sel,
+    webview: *mut AnyObject,
+    navigation: *mut AnyObject,
+) {
+    let _ = catch_unwind(AssertUnwindSafe(|| on_redirected(webview, navigation)));
+    call_navigation(&ORIGINAL_REDIRECTED, this, cmd, webview, navigation);
+}
+
+/// wry's own policy method, which decides what happens to the navigation.
+unsafe fn call_policy(
     original: &AtomicUsize,
     this: *mut AnyObject,
     cmd: Sel,
@@ -196,10 +270,24 @@ unsafe fn call_original(
     }
 }
 
+unsafe fn call_navigation(
+    original: &AtomicUsize,
+    this: *mut AnyObject,
+    cmd: Sel,
+    webview: *mut AnyObject,
+    navigation: *mut AnyObject,
+) {
+    let address = original.load(Ordering::SeqCst);
+    if address != 0 {
+        let wrapped: NavigationFn = std::mem::transmute::<usize, NavigationFn>(address);
+        wrapped(this, cmd, webview, navigation);
+    }
+}
+
 /// Replace `sel` on `class` with `new`, keeping the method it replaces in `keep`.
 /// `false` when the class has no such method: there is then nothing to wrap, and
 /// nothing has been changed.
-unsafe fn wrap(class: *mut AnyClass, sel: Sel, new: PolicyFn, keep: &AtomicUsize) -> bool {
+unsafe fn wrap(class: *mut AnyClass, sel: Sel, new: Imp, keep: &AtomicUsize) -> bool {
     let method = objc2::ffi::class_getInstanceMethod(class, sel);
     if method.is_null() {
         return false;
@@ -209,13 +297,20 @@ unsafe fn wrap(class: *mut AnyClass, sel: Sel, new: PolicyFn, keep: &AtomicUsize
     };
     keep.store(original as usize, Ordering::SeqCst);
     let types = objc2::ffi::method_getTypeEncoding(method);
-    objc2::ffi::class_replaceMethod(class, sel, std::mem::transmute::<PolicyFn, Imp>(new), types);
+    objc2::ffi::class_replaceMethod(class, sel, new, types);
     true
 }
 
+/// Give `class` the optional delegate method `sel`: added when the class lacks
+/// it, wrapped (its own still called after) when it has one.
+unsafe fn hook(class: *mut AnyClass, sel: Sel, new: NavigationFn, keep: &AtomicUsize) -> bool {
+    let imp = std::mem::transmute::<NavigationFn, Imp>(new);
+    objc2::ffi::class_addMethod(class, sel, imp, c"v@:@@".as_ptr()).as_bool()
+        || wrap(class, sel, imp, keep)
+}
+
 /// Start logging the page's navigations. Called once, before the first one, by
-/// `wk_delegate::install`. Arms [`crate::netlog`] only if both methods were
-/// wrapped.
+/// `wk_delegate::install`. Arms [`crate::netlog`] only if every hook took effect.
 ///
 /// # Safety
 ///
@@ -223,27 +318,41 @@ unsafe fn wrap(class: *mut AnyClass, sel: Sel, new: PolicyFn, keep: &AtomicUsize
 /// and `page_webview` that WKWebView. Call it on the main thread, before the
 /// delegate is next set on the webview, as `wk_delegate::install` does.
 pub unsafe fn install(class: *mut AnyClass, page_webview: *mut AnyObject) {
-    if ORIGINAL_ACTION.load(Ordering::SeqCst) != 0 {
+    // Once per process: wrapping twice would make a wrapper its own original.
+    if INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
     let action = wrap(
         class,
         sel!(webView:decidePolicyForNavigationAction:decisionHandler:),
-        decide_action,
+        std::mem::transmute::<PolicyFn, Imp>(decide_action as PolicyFn),
         &ORIGINAL_ACTION,
     );
     let response = wrap(
         class,
         sel!(webView:decidePolicyForNavigationResponse:decisionHandler:),
-        decide_response,
+        std::mem::transmute::<PolicyFn, Imp>(decide_response as PolicyFn),
         &ORIGINAL_RESPONSE,
     );
-    if !(action && response) {
-        // One wrapper may have taken effect. It is harmless (it calls wry's method),
+    let started = hook(
+        class,
+        sel!(webView:didStartProvisionalNavigation:),
+        did_start,
+        &ORIGINAL_STARTED,
+    );
+    let redirected = hook(
+        class,
+        sel!(webView:didReceiveServerRedirectForProvisionalNavigation:),
+        did_redirect,
+        &ORIGINAL_REDIRECTED,
+    );
+    if !(action && response && started && redirected) {
+        // What did take effect is harmless (it calls wry's method, or nothing),
         // but the log is not armed, so nothing claims it works.
         tracing::error!(
-            "[wk-nav] the navigation delegate lacks a method this needs (action: {action}, \
-             response: {response}); `nav-log` stays unavailable on this daemon"
+            "[wk-nav] the navigation delegate could not be hooked (action: {action}, response: \
+             {response}, started: {started}, redirected: {redirected}); `nav-log` stays \
+             unavailable on this daemon"
         );
         return;
     }

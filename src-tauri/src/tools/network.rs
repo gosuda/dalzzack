@@ -92,8 +92,10 @@ pub async fn tool_navigation_log(args: &Value) -> Result<Value> {
         result["limits"] = json!(
             "WKWebView reports navigations only (the main frame and iframes), with the final \
              response's status and headers. It does not report a redirect's own status code: a \
-             redirect hop shows its `location` and no `status`. Subresource requests (scripts, \
-             images, fetch) are not in this log; use `--engine chrome` for those."
+             redirect hop shows its `location` and no `status`. Request headers are not seen \
+             (`--headers` shows none), an iframe's redirects are separate entries, and an \
+             iframe is never `committed`. Subresource requests (scripts, images, fetch) are not \
+             in this log; use `--engine chrome` for those."
         );
     }
     Ok(result)

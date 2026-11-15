@@ -2,15 +2,19 @@
 //! `Network.*` and `Page.*` events [`crate::netlog`] already reads.
 //!
 //! WKWebView has no network event stream, so on macOS `nav-log` had nothing to
-//! read. Its delegate does say, for the main frame and for iframes, that a
-//! navigation is about to start, what response came back (status, headers,
-//! type), and when the document committed, finished or failed. That is a
-//! navigation timeline, and netlog builds one from CDP events, so this module
-//! only translates: one call per delegate callback in, CDP-shaped events out.
+//! read. Its delegate does say, for the main frame, when a load starts (with the
+//! `WKNavigation` it is), when a server redirects it, what response came back
+//! (status, headers, type), and when the document committed, finished or failed;
+//! for an iframe, that a load is about to start and what response came back.
+//! That is a navigation timeline, and netlog builds one from CDP events, so this
+//! module only translates: one call per delegate callback in, CDP-shaped events
+//! out.
 //!
 //! What WebKit does not say, and what this therefore cannot: subresource
-//! requests, and the status of a redirect's own response (`302`/`301`): only the
-//! URL it led to. A redirect hop shows its `location` and no status.
+//! requests, request headers, the status of a redirect's own response
+//! (`302`/`301`): only the URL it led to, so a redirect hop shows its `location`
+//! and no status. An iframe has no `WKNavigation`, so its redirects are not
+//! joined into one request.
 //!
 //! The translation is plain data, so it is tested without a window; the macOS
 //! glue that calls it is `crate::platform::wk_nav`.
@@ -29,24 +33,35 @@ pub struct Event {
 #[derive(Debug, Clone, Default)]
 pub struct Response {
     pub url: String,
-    pub status: i64,
+    /// `None` for a response that is not HTTP (a `file://` page).
+    pub status: Option<i64>,
     pub mime_type: Option<String>,
     pub headers: BTreeMap<String, String>,
 }
 
-/// WKNavigationTypeOther. A server redirect arrives as one; so does a
-/// navigation a script or `navigate` started.
-const NAVIGATION_TYPE_OTHER: i64 = -1;
-
 const MAIN_FRAME: &str = "main";
+
+/// Iframe loads kept waiting for their response. A page that keeps starting
+/// iframes that never answer cannot grow the tracker past this.
+const FRAME_CAP: usize = 64;
+
+/// Why an iframe load is closed without a response: WebKit says nothing more
+/// about an iframe than its start and its response.
+const NO_FRAME_RESPONSE: &str =
+    "no response was seen for this frame (it redirected, or the page stopped it)";
 
 #[derive(Debug, Clone)]
 struct InFlight {
     request_id: String,
     loader_id: String,
     frame_id: String,
-    /// Which iframe, for telling two apart; `0` for the main frame.
-    frame_key: usize,
+    /// The main frame's `WKNavigation` (its address), which the redirect and the
+    /// failure callbacks name. `0` for an iframe, and for a load the log saw
+    /// only from its response.
+    navigation: usize,
+    /// For an iframe: how many main-frame loads had started when it began, so a
+    /// new document closes only the iframes of the one before.
+    generation: u64,
     /// The URL this request is at now: the last hop.
     url: String,
     responded: bool,
@@ -55,6 +70,11 @@ struct InFlight {
 #[derive(Debug, Default)]
 pub struct Tracker {
     next: u64,
+    /// Main-frame loads started so far.
+    generation: u64,
+    /// The last main-frame navigation action, `(url, method)`: the method the
+    /// load it leads to is sent with (a form's POST).
+    last_action: Option<(String, String)>,
     main: Option<InFlight>,
     frames: Vec<InFlight>,
 }
@@ -63,6 +83,8 @@ impl Tracker {
     pub const fn new() -> Self {
         Tracker {
             next: 0,
+            generation: 0,
+            last_action: None,
             main: None,
             frames: Vec::new(),
         }
@@ -98,126 +120,170 @@ impl Tracker {
         }
     }
 
-    fn canceled(request: &InFlight, why: &str) -> Event {
+    fn closed(request: &InFlight, why: &str, canceled: bool) -> Event {
         Event {
             name: "Network.loadingFailed",
             params: json!({
                 "requestId": request.request_id,
                 "type": "Document",
                 "errorText": why,
-                "canceled": true,
-                // The delegate's failure callback has recorded failures
-                // already; this one is bookkeeping and must not be recorded
-                // as a failed load a second time.
+                "canceled": canceled,
+                // The delegate's failure callback records real failures itself;
+                // this one closes the request and must not be recorded as a
+                // failed load a second time.
                 "alreadyRecorded": true,
             }),
         }
     }
 
-    /// A navigation is about to start: `decidePolicyForNavigationAction`.
+    /// The method a main-frame load at `url` is sent with: its action's, when
+    /// the last action was for this URL.
+    fn method_for(&self, url: &str) -> String {
+        match &self.last_action {
+            Some((action_url, method)) if action_url == url => method.clone(),
+            _ => "GET".to_string(),
+        }
+    }
+
+    /// A navigation is being decided: `decidePolicyForNavigationAction`.
     ///
-    /// For a redirect WebKit asks about the next URL first and says
-    /// `didReceiveServerRedirect` after, so a navigation that arrives while the
-    /// frame's previous one has had no response, and is not one the user made
-    /// (a link, a form, back/forward), is the next hop of that request.
-    pub fn action(
-        &mut self,
-        url: &str,
-        method: &str,
-        main: bool,
-        frame_key: usize,
-        navigation_type: i64,
-    ) -> Vec<Event> {
+    /// For the main frame this only notes the method: the load itself begins at
+    /// [`Tracker::started`], which a fragment link, a download and a navigation
+    /// the host cancels never reach. An iframe has no later start to wait for,
+    /// so its request begins here.
+    pub fn action(&mut self, url: &str, method: &str, main: bool) -> Vec<Event> {
+        if main {
+            self.last_action = Some((url.to_string(), method.to_string()));
+            return Vec::new();
+        }
         let mut events = Vec::new();
-        let slot = if main {
-            self.main.as_ref()
-        } else {
-            self.frames.iter().find(|f| f.frame_key == frame_key)
-        };
-        if let Some(open) = slot.filter(|f| !f.responded).cloned() {
-            if navigation_type == NAVIGATION_TYPE_OTHER {
-                let previous = open.url.clone();
-                let hop = InFlight {
-                    url: url.to_string(),
-                    ..open
-                };
-                events.push(Self::request_event(&hop, method, Some(&previous)));
-                self.store(hop, main);
-                return events;
+        if self.frames.len() >= FRAME_CAP {
+            let oldest = self.frames.remove(0);
+            if !oldest.responded {
+                events.push(Self::closed(&oldest, NO_FRAME_RESPONSE, true));
             }
-            // Something else was started: the open one will never answer.
-            events.push(Self::canceled(&open, "superseded by a newer navigation"));
         }
         let request_id = self.id("req");
-        let loader_id = self.id("loader");
-        let frame_id = if main {
-            MAIN_FRAME.to_string()
-        } else {
-            format!("frame-{frame_key:x}")
-        };
         let request = InFlight {
+            frame_id: format!("frame-{}", self.next),
+            loader_id: self.id("loader"),
             request_id,
-            loader_id,
-            frame_id,
-            frame_key,
+            navigation: 0,
+            generation: self.generation,
             url: url.to_string(),
             responded: false,
         };
         events.push(Self::request_event(&request, method, None));
-        self.store(request, main);
+        self.frames.push(request);
         events
     }
 
-    fn store(&mut self, request: InFlight, main: bool) {
-        if main {
-            self.main = Some(request);
-        } else if let Some(at) = self
-            .frames
-            .iter()
-            .position(|f| f.frame_key == request.frame_key)
-        {
-            self.frames[at] = request;
-        } else {
-            self.frames.push(request);
+    /// The main frame began a load: `didStartProvisionalNavigation`. A load
+    /// still waiting for its response is replaced by it; WebKit's own failure
+    /// for that one comes later and names the old navigation, so it closes
+    /// nothing here.
+    pub fn started(&mut self, navigation: usize, url: &str) -> Vec<Event> {
+        let mut events = Vec::new();
+        if let Some(open) = &self.main {
+            if open.navigation == navigation && navigation != 0 {
+                return events;
+            }
+            if !open.responded {
+                events.push(Self::closed(open, "superseded by a newer navigation", true));
+            }
         }
+        self.generation += 1;
+        let request = InFlight {
+            request_id: self.id("req"),
+            loader_id: self.id("loader"),
+            frame_id: MAIN_FRAME.to_string(),
+            navigation,
+            generation: self.generation,
+            url: url.to_string(),
+            responded: false,
+        };
+        events.push(Self::request_event(&request, &self.method_for(url), None));
+        self.main = Some(request);
+        events
+    }
+
+    /// A server redirected the main frame's load:
+    /// `didReceiveServerRedirectForProvisionalNavigation`. `url` is where it
+    /// goes now. The same request gets a hop, as CDP reports a redirect.
+    pub fn redirected(&mut self, navigation: usize, url: &str) -> Vec<Event> {
+        let open = self
+            .main
+            .clone()
+            .filter(|m| m.navigation == navigation && !m.responded);
+        let Some(open) = open else {
+            // The log did not see this load start.
+            return self.started(navigation, url);
+        };
+        if open.url == url {
+            return Vec::new();
+        }
+        let hop = InFlight {
+            url: url.to_string(),
+            ..open.clone()
+        };
+        let events = vec![Self::request_event(
+            &hop,
+            &self.method_for(url),
+            Some(&open.url),
+        )];
+        self.main = Some(hop);
+        events
     }
 
     /// A response came back: `decidePolicyForNavigationResponse`.
     pub fn response(&mut self, response: &Response, main: bool) -> Vec<Event> {
         let mut events = Vec::new();
         let found = if main {
-            self.main.clone()
+            self.main.clone().filter(|m| !m.responded)
         } else {
-            // A response names no frame; the one asking for this URL is it.
+            // A response names no frame; the newest load asking for this URL is
+            // it (an older one that never answered was stopped).
             self.frames
                 .iter()
+                .rev()
                 .find(|f| !f.responded && f.url == response.url)
                 .cloned()
         };
         let mut request = match found {
             Some(r) => r,
             None => {
-                // The navigation began before the log was watching.
-                let key = 0;
+                // The load began before the log was watching.
                 let synthetic = InFlight {
                     request_id: self.id("req"),
                     loader_id: self.id("loader"),
                     frame_id: if main {
                         MAIN_FRAME.to_string()
                     } else {
-                        "frame-unknown".to_string()
+                        format!("frame-{}", self.next)
                     },
-                    frame_key: key,
+                    navigation: 0,
+                    generation: self.generation,
                     url: response.url.clone(),
                     responded: false,
                 };
                 events.push(Self::request_event(&synthetic, "GET", None));
+                if !main {
+                    self.frames.push(synthetic.clone());
+                }
                 synthetic
             }
         };
         let mut headers = Map::new();
         for (name, value) in &response.headers {
             headers.insert(name.clone(), Value::String(value.clone()));
+        }
+        let mut answer = json!({
+            "url": response.url,
+            "mimeType": response.mime_type,
+            "headers": headers,
+        });
+        if let Some(status) = response.status {
+            answer["status"] = json!(status);
         }
         events.push(Event {
             name: "Network.responseReceived",
@@ -227,30 +293,46 @@ impl Tracker {
                 "type": "Document",
                 "frameId": request.frame_id,
                 "hasExtraInfo": false,
-                "response": {
-                    "url": response.url,
-                    "status": response.status,
-                    "mimeType": response.mime_type,
-                    "headers": headers,
-                },
+                "response": answer,
             }),
         });
         request.url = response.url.clone();
         request.responded = true;
-        self.store(request, main);
+        if main {
+            self.main = Some(request);
+        } else if let Some(slot) = self
+            .frames
+            .iter_mut()
+            .find(|f| f.request_id == request.request_id)
+        {
+            *slot = request;
+        }
         events
     }
 
-    /// The main frame's document committed: `didCommitNavigation`.
+    /// The main frame's document committed: `didCommitNavigation`. The iframes
+    /// of the document before it are gone, answered or not.
     pub fn commit(&mut self, url: &str) -> Vec<Event> {
+        let current = self.generation;
+        let mut events = Vec::new();
+        self.frames.retain(|f| {
+            if f.generation >= current {
+                return true;
+            }
+            if !f.responded {
+                events.push(Self::closed(f, NO_FRAME_RESPONSE, true));
+            }
+            false
+        });
         let loader_id = match &self.main {
             Some(m) => m.loader_id.clone(),
             None => self.id("loader"),
         };
-        vec![Event {
+        events.push(Event {
             name: "Page.frameNavigated",
             params: json!({ "frame": { "id": MAIN_FRAME, "url": url, "loaderId": loader_id } }),
-        }]
+        });
+        events
     }
 
     /// The main frame finished loading: `didFinishNavigation`.
@@ -265,20 +347,20 @@ impl Tracker {
         }
     }
 
-    /// The main frame's load failed: `didFailProvisionalNavigation`. The failure
-    /// itself is recorded by the delegate; this closes the request.
-    pub fn failed(&mut self, error: &str, canceled: bool) -> Vec<Event> {
+    /// A main-frame load failed: `didFailProvisionalNavigation`, which names the
+    /// navigation. It closes that request only: the failure of a load that a
+    /// newer one already replaced closes nothing. The failure itself is
+    /// recorded by the delegate.
+    pub fn failed(&mut self, navigation: usize, error: &str, canceled: bool) -> Vec<Event> {
+        if !self
+            .main
+            .as_ref()
+            .is_some_and(|m| m.navigation == navigation)
+        {
+            return Vec::new();
+        }
         match self.main.take() {
-            Some(m) => vec![Event {
-                name: "Network.loadingFailed",
-                params: json!({
-                    "requestId": m.request_id,
-                    "type": "Document",
-                    "errorText": error,
-                    "canceled": canceled,
-                    "alreadyRecorded": true,
-                }),
-            }],
+            Some(m) => vec![Self::closed(&m, error, canceled)],
             None => Vec::new(),
         }
     }
@@ -288,14 +370,21 @@ impl Tracker {
 mod tests {
     use super::*;
 
+    const A: usize = 0xa0;
+    const B: usize = 0xb0;
+
     fn names(events: &[Event]) -> Vec<&'static str> {
         events.iter().map(|e| e.name).collect()
+    }
+
+    fn id(event: &Event) -> String {
+        event.params["requestId"].as_str().unwrap().to_string()
     }
 
     fn page(url: &str, status: i64) -> Response {
         Response {
             url: url.to_string(),
-            status,
+            status: Some(status),
             mime_type: Some("text/html".into()),
             headers: BTreeMap::from([("Content-Type".into(), "text/html".into())]),
         }
@@ -304,12 +393,14 @@ mod tests {
     #[test]
     fn a_redirect_chain_is_one_request_with_a_hop_per_url() {
         let mut t = Tracker::default();
-        let first = t.action("http://h/", "GET", true, 0, -1);
-        let hop2 = t.action("http://h/hop2", "GET", true, 0, -1);
-        let hop3 = t.action("http://h/page", "GET", true, 0, -1);
+        t.action("http://h/", "GET", true);
+        let first = t.started(A, "http://h/");
+        t.action("http://h/hop2", "GET", true);
+        let hop2 = t.redirected(A, "http://h/hop2");
+        t.action("http://h/page", "GET", true);
+        let hop3 = t.redirected(A, "http://h/page");
         let done = t.response(&page("http://h/page", 200), true);
 
-        let id = |e: &Event| e.params["requestId"].as_str().unwrap().to_string();
         assert_eq!(first.len(), 1);
         assert_eq!(id(&first[0]), id(&hop2[0]));
         assert_eq!(id(&hop2[0]), id(&hop3[0]));
@@ -330,45 +421,120 @@ mod tests {
     }
 
     #[test]
+    fn a_form_post_answered_with_a_redirect_is_one_chain_from_post_to_get() {
+        // A redirect arrives with the navigation type of what started it (a
+        // form, a link), so only WebKit's redirect callback can say it is one.
+        let mut t = Tracker::default();
+        t.action("http://h/submit", "POST", true);
+        let post = t.started(A, "http://h/submit");
+        t.action("http://h/done", "GET", true);
+        let get = t.redirected(A, "http://h/done");
+        assert_eq!(post[0].params["request"]["method"], "POST");
+        assert_eq!(get[0].params["request"]["method"], "GET");
+        assert_eq!(id(&post[0]), id(&get[0]));
+        assert_eq!(get[0].params["redirectResponse"]["url"], "http://h/submit");
+    }
+
+    #[test]
+    fn a_navigation_started_while_one_waits_replaces_it_and_the_late_failure_closes_nothing() {
+        let mut t = Tracker::default();
+        let slow = t.started(A, "http://h/slow");
+        let other = t.started(B, "http://h/other");
+        assert_eq!(
+            names(&other),
+            ["Network.loadingFailed", "Network.requestWillBeSent"]
+        );
+        assert_eq!(id(&other[0]), id(&slow[0]));
+        assert_eq!(other[0].params["canceled"], true);
+        assert_ne!(id(&other[1]), id(&slow[0]));
+
+        // WebKit cancels the slow load (-999) after the new one started: that
+        // failure names the slow navigation, not the one now open.
+        assert!(t.failed(A, "cancelled", true).is_empty());
+        let answer = t.response(&page("http://h/other", 200), true);
+        assert_eq!(names(&answer), ["Network.responseReceived"]);
+        assert_eq!(id(&answer[0]), id(&other[1]));
+    }
+
+    #[test]
+    fn a_fragment_link_or_a_cancelled_navigation_opens_no_request() {
+        // A fragment link, a download, a navigation the host refuses: decided,
+        // never started. The next load is a request of its own, not a hop.
+        let mut t = Tracker::default();
+        t.started(A, "http://h/page");
+        t.response(&page("http://h/page", 200), true);
+        t.finished();
+        assert!(t.action("http://h/page#section", "GET", true).is_empty());
+        let next = t.started(B, "http://other/");
+        assert_eq!(names(&next), ["Network.requestWillBeSent"]);
+        assert!(next[0].params.get("redirectResponse").is_none());
+    }
+
+    #[test]
     fn a_navigation_after_a_response_is_a_new_request() {
         // The challenge page that reloads itself: 403, then a script navigates.
         let mut t = Tracker::default();
-        let a = t.action("http://h/challenge", "GET", true, 0, -1);
+        let a = t.started(A, "http://h/challenge");
         t.response(&page("http://h/challenge", 403), true);
-        let b = t.action("http://h/challenge?solved=1", "GET", true, 0, -1);
-        assert_ne!(a[0].params["requestId"], b[0].params["requestId"]);
+        let b = t.started(B, "http://h/challenge?solved=1");
+        assert_ne!(id(&a[0]), id(&b[0]));
         assert!(b[0].params.get("redirectResponse").is_none());
         assert_eq!(names(&b), ["Network.requestWillBeSent"]);
     }
 
     #[test]
-    fn a_navigation_the_user_made_replaces_one_still_waiting() {
+    fn an_iframe_is_tracked_apart_from_the_main_frame() {
         let mut t = Tracker::default();
-        let a = t.action("http://h/slow", "GET", true, 0, -1);
-        // A link click (type 0) is not a redirect of the slow page.
-        let b = t.action("http://h/other", "GET", true, 0, 0);
-        assert_eq!(
-            names(&b),
-            ["Network.loadingFailed", "Network.requestWillBeSent"]
-        );
-        assert_eq!(b[0].params["requestId"], a[0].params["requestId"]);
-        assert_eq!(b[0].params["canceled"], true);
-        assert_ne!(b[1].params["requestId"], a[0].params["requestId"]);
+        let main = t.started(A, "http://h/");
+        let frame = t.action("http://other/ad", "GET", false);
+        assert_ne!(id(&main[0]), id(&frame[0]));
+        assert_ne!(frame[0].params["frameId"], "main");
+        // The iframe's response finds its own request by URL.
+        let resp = t.response(&page("http://other/ad", 200), false);
+        assert_eq!(id(&resp[0]), id(&frame[0]));
+        // The main frame finishing closes itself and lets the answered iframe go.
+        let done = t.finished();
+        assert_eq!(names(&done), ["Network.loadingFinished"]);
+        assert_eq!(id(&done[0]), id(&main[0]));
+        assert!(t.frames.is_empty(), "the answered iframe is not kept");
     }
 
     #[test]
-    fn an_iframe_is_tracked_apart_from_the_main_frame() {
+    fn an_iframe_reloaded_after_a_load_that_never_answered_gets_its_own_response() {
         let mut t = Tracker::default();
-        let main = t.action("http://h/", "GET", true, 0, -1);
-        let frame = t.action("http://other/ad", "GET", false, 0xbeef, -1);
-        assert_ne!(main[0].params["requestId"], frame[0].params["requestId"]);
-        assert_eq!(frame[0].params["frameId"], "frame-beef");
-        // The iframe's response finds its own request by URL.
-        let resp = t.response(&page("http://other/ad", 200), false);
-        assert_eq!(resp[0].params["requestId"], frame[0].params["requestId"]);
-        // The main frame finishing leaves the answered iframe out and itself closed.
-        let done = t.finished();
-        assert_eq!(done[0].params["requestId"], main[0].params["requestId"]);
+        t.started(A, "http://h/");
+        let dead = t.action("http://ad/x", "GET", false);
+        let again = t.action("http://ad/x", "GET", false);
+        let resp = t.response(&page("http://ad/x", 200), false);
+        assert_eq!(id(&resp[0]), id(&again[0]));
+        assert_ne!(id(&resp[0]), id(&dead[0]));
+    }
+
+    #[test]
+    fn a_new_document_closes_the_iframes_of_the_one_before_and_keeps_its_own() {
+        let mut t = Tracker::default();
+        t.started(A, "http://h/one");
+        let old = t.action("http://ad/old", "GET", false);
+        t.started(B, "http://h/two");
+        let new = t.action("http://ad/new", "GET", false);
+        let commit = t.commit("http://h/two");
+        assert_eq!(
+            names(&commit),
+            ["Network.loadingFailed", "Page.frameNavigated"]
+        );
+        assert_eq!(id(&commit[0]), id(&old[0]));
+        assert_eq!(commit[0].params["alreadyRecorded"], true);
+        assert_eq!(t.frames.len(), 1);
+        assert_eq!(t.frames[0].request_id, id(&new[0]));
+    }
+
+    #[test]
+    fn iframes_that_never_answer_cannot_grow_the_tracker_without_bound() {
+        let mut t = Tracker::default();
+        for i in 0..FRAME_CAP * 3 {
+            t.action(&format!("http://ad/{i}"), "GET", false);
+        }
+        assert_eq!(t.frames.len(), FRAME_CAP);
     }
 
     #[test]
@@ -379,25 +545,26 @@ mod tests {
             names(&events),
             ["Network.requestWillBeSent", "Network.responseReceived"]
         );
-        assert_eq!(events[0].params["requestId"], events[1].params["requestId"]);
+        assert_eq!(id(&events[0]), id(&events[1]));
     }
 
     #[test]
-    fn a_failed_load_closes_the_request_without_being_recorded_twice() {
+    fn a_failed_load_closes_its_own_request_once() {
         let mut t = Tracker::default();
-        t.action("http://h/down", "GET", true, 0, -1);
-        let events = t.failed("could not connect", false);
+        let open = t.started(A, "http://h/down");
+        let events = t.failed(A, "could not connect", false);
         assert_eq!(names(&events), ["Network.loadingFailed"]);
+        assert_eq!(id(&events[0]), id(&open[0]));
         assert_eq!(events[0].params["alreadyRecorded"], true);
         assert_eq!(events[0].params["errorText"], "could not connect");
         // Nothing open any more: a second failure has nothing to close.
-        assert!(t.failed("again", false).is_empty());
+        assert!(t.failed(A, "again", false).is_empty());
     }
 
     #[test]
     fn commit_and_finish_carry_the_loader_and_the_request() {
         let mut t = Tracker::default();
-        let req = t.action("http://h/", "GET", true, 0, -1);
+        let req = t.started(A, "http://h/");
         t.response(&page("http://h/", 200), true);
         let commit = t.commit("http://h/");
         assert_eq!(commit[0].params["frame"]["id"], "main");
@@ -406,13 +573,27 @@ mod tests {
             req[0].params["loaderId"]
         );
         let done = t.finished();
-        assert_eq!(done[0].params["requestId"], req[0].params["requestId"]);
+        assert_eq!(id(&done[0]), id(&req[0]));
+    }
+
+    #[test]
+    fn a_response_that_is_not_http_claims_no_status() {
+        let mut t = Tracker::default();
+        t.started(A, "file:///tmp/a.html");
+        let file = Response {
+            url: "file:///tmp/a.html".into(),
+            status: None,
+            mime_type: Some("text/html".into()),
+            headers: BTreeMap::new(),
+        };
+        let events = t.response(&file, true);
+        assert!(events[0].params["response"].get("status").is_none());
     }
 
     #[test]
     fn response_headers_pass_through_for_the_log_to_redact() {
         let mut t = Tracker::default();
-        t.action("http://h/", "GET", true, 0, -1);
+        t.started(A, "http://h/");
         let mut r = page("http://h/", 200);
         r.headers.insert("Set-Cookie".into(), "sid=secret".into());
         let events = t.response(&r, true);
