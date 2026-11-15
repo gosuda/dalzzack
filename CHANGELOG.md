@@ -6,6 +6,8 @@ All notable changes to dalzzack. The format loosely follows
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-15
+
 ### Added
 
 - `scroll` finds the element that really scrolls: the window while it can still
@@ -36,8 +38,8 @@ All notable changes to dalzzack. The format loosely follows
 - `screencast start|stop|status`: record the page as an mp4. Run commands (scroll,
   click, navigate) between `start` and `stop --output FILE`. Page only (not the
   window, the toolbar or the screen), H.264 `yuv420p`, in real time, at the page's
-  size in CSS pixels. On macOS it takes WebKit snapshots of the page (measured at
-  about 50 frames a second, with the window in front, in the background or covered);
+  size in CSS pixels. On macOS it takes WebKit snapshots of the page (captured at
+  up to about 55 frames a second, with the window in front, in the background or covered);
   on `--engine chrome` it uses CDP `Page.startScreencast`. ffmpeg makes the file at
   `stop`; without it the frames are kept (`FFMPEG_NOT_FOUND`) and `stop` can be run
   again. Capture ends by itself at `--max-seconds` (default 120). While it records,
@@ -54,6 +56,13 @@ All notable changes to dalzzack. The format loosely follows
 
 - `scroll --selector` with a quote in the selector (`p[data-x='y']`) broke the
   script it was pasted into. The selector now travels as JSON.
+
+### Known issues
+
+- The video shows about 24 different frames a second whatever `--fps` is set to.
+  The frame list leaves ffmpeg's image timebase at 1/25 s, so frames captured
+  faster than that are dropped and repeated: a faster capture does not give a
+  smoother video yet. Measured on macOS with real recordings at 30 and 60 fps.
 
 ## [1.4.0] - 2026-11-12
 
