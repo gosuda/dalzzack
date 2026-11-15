@@ -274,18 +274,19 @@ print("recorded", d["frames"], "frames,", d["duration_ms"], "ms")
 fi
 
 step "resize to a phone size reports the size the page really has"
-RESIZED=$(dalzzack resize -i "$ID" --width 375 --height 700)
+# 480 tall, as the CI runner's screen allows (the start step above explains why).
+RESIZED=$(dalzzack resize -i "$ID" --width 375 --height 480)
 printf '%s' "$RESIZED" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-if d.get("exact") is not True or d["viewport"] != {"width": 375, "height": 700}:
-    raise SystemExit(f"FAIL: expected a 375x700 page, got {d}")
+if d.get("exact") is not True or d["viewport"] != {"width": 375, "height": 480}:
+    raise SystemExit(f"FAIL: expected a 375x480 page, got {d}")
 print("page is", d["viewport"])
 '
 INNER=$(dalzzack exec-js -i "$ID" --script 'return innerWidth + "x" + innerHeight' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin).get("result",""))')
-if [ "$INNER" != "375x700" ]; then
-  echo "FAIL: the page says it is $INNER, the window reported 375x700" >&2
+if [ "$INNER" != "375x480" ]; then
+  echo "FAIL: the page says it is $INNER, the window reported 375x480" >&2
   exit 1
 fi
 
