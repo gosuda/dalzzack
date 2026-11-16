@@ -40,7 +40,15 @@ const SHOWN: &[&str] = &[
     "max",
     "method",
     "resource-type",
+    "output",
+    "fps",
+    "max-seconds",
+    "quality",
 ];
+
+/// The action word of `record`, `screencast`, `cookies` and the like. These are
+/// a fixed list the CLI itself checks (never text someone typed), so they show.
+const ACTIONS: &[&str] = &["start", "stop", "status", "on", "off", "list", "clear"];
 
 /// A URL can carry a token in its query or fragment, so only up to there shows,
 /// and never the credentials in front of its host.
@@ -123,6 +131,8 @@ pub fn command_label(words: &[String]) -> String {
             if command.is_none() {
                 command = Some(word);
                 shown.push(word.to_string());
+            } else if ACTIONS.contains(&word) {
+                shown.push(word.to_string());
             } else {
                 shown.push(MASK.to_string());
             }
@@ -195,6 +205,22 @@ mod tests {
         let words = ["click", "--text", "Sign In"].map(String::from);
         assert_eq!(command_label(&words), "click --text \"Sign In\"");
         assert_eq!(label("click -i b --selector #pay"), "click --selector #pay");
+    }
+
+    #[test]
+    fn an_action_word_and_a_file_name_are_not_secrets() {
+        assert_eq!(label("screencast start"), "screencast start");
+        assert_eq!(
+            label("screencast stop -i b --output docs.mp4"),
+            "screencast stop --output docs.mp4"
+        );
+        assert_eq!(label("record on"), "record on");
+        // A word that is not one of the fixed actions is still an argument.
+        assert_eq!(label("cookies set sid"), "cookies •••• ••••");
+        assert_eq!(
+            label("cookies list --domain x.test"),
+            "cookies list --domain ••••"
+        );
     }
 
     #[test]

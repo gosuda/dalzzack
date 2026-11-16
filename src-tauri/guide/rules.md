@@ -9,7 +9,7 @@
 - Use `fill-form --selector --value` for single fields (no JSON needed)
 - Use `wait-for --state added` instead of `sleep` to wait for new content
 - Use `save-image --index -1` to grab the last matching image
-- Use `scroll --to bottom` for SPA containers with dynamic content
+- `scroll` finds the element that really scrolls (the window, else the scroller under the middle of the page), so an SPA or docs page whose text scrolls inside a div just works: read `moved` and `container` in the result, and pass `--selector` only to choose another. Use `scroll --to bottom` to reach the end of dynamic content
 - Use `back` / `forward` / `reload` for history navigation rather than re-navigating to a previous URL
 - Use `console-logs` when JS-driven UI misbehaves — the page's own errors are usually the fastest debug signal. It no longer needs a live renderer, so reach for it during a hang too
 - **To see what happened before the page's own code ran, `inject-script` is the only option** — `exec-js` always arrives too late. Pick `--world main` if you need to wrap or watch a page API; `isolated` cannot see page globals and will silently observe nothing

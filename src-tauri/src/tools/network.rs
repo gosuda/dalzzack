@@ -72,9 +72,11 @@ pub async fn tool_navigation_log(args: &Value) -> Result<Value> {
     } else {
         None
     };
-    Ok(json!({
+    let transport = crate::netlog::transport();
+    let mut result = json!({
         "status": "completed",
         "engine": crate::engine::current().as_str(),
+        "source": transport.as_str(),
         "current_url": current_url,
         "current_url_ms": current_url_ms,
         "returned": navs.len(),
@@ -82,7 +84,21 @@ pub async fn tool_navigation_log(args: &Value) -> Result<Value> {
         "redacted": q.redact,
         "navigations": navs,
         "hint": hint,
-    }))
+    });
+    if transport == crate::netlog::Transport::WebkitNavigations {
+        // WKWebView's delegate reports navigations, not requests: what a reader
+        // would otherwise assume is covered, is not.
+        result["coverage"] = json!("navigations");
+        result["limits"] = json!(
+            "WKWebView reports navigations only (the main frame and iframes), with the final \
+             response's status and headers. It does not report a redirect's own status code: a \
+             redirect hop shows its `location` and no `status`. Request headers are not seen \
+             (`--headers` shows none), an iframe's redirects are separate entries, and an \
+             iframe is never `committed`. Subresource requests (scripts, images, fetch) are not \
+             in this log; use `--engine chrome` for those."
+        );
+    }
+    Ok(result)
 }
 
 /// `failed-requests` on WKWebView. There is no network stream, but the
@@ -155,7 +171,9 @@ fn since_to_epoch(ago_ms: u64) -> u64 {
 /// `failed-requests` — network failures of every resource type (scripts,
 /// images, documents, fetch, …) with their URLs, plus HTTP errors.
 pub async fn tool_failed_requests(args: &Value) -> Result<Value> {
-    if !crate::netlog::is_armed() {
+    // The macOS log holds navigations only, so it cannot say that no script or
+    // image failed: that stays the delegate's main-frame answer, with its limits.
+    if !crate::netlog::has_subresources() {
         if crate::main_frame::webkit_capture() {
             return Ok(webkit_failed_requests(args));
         }

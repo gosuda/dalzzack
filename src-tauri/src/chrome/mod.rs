@@ -566,6 +566,7 @@ fn on_page_event(b: &Arc<Browser>, ev: &Event) {
             }
         }
         "Fetch.requestPaused" => intercept::on_request_paused(b, None, &ev.params),
+        "Page.screencastFrame" => screencast_frame(b, &ev.params),
         "ServiceWorker.workerErrorReported" => crate::sw_console::ingest_worker_error(&ev.params),
         "ServiceWorker.workerVersionUpdated" => crate::sw_console::note_worker_version(),
         "Inspector.targetCrashed" => {
@@ -580,6 +581,24 @@ fn on_page_event(b: &Arc<Browser>, ev: &Event) {
         _ => {}
     }
     crate::recording::ingest_cdp_event(&ev.method, &ev.params);
+}
+
+/// A frame of an active `screencast`. Chrome sends no more until each is
+/// acknowledged, so the acknowledgement goes out whatever became of the frame.
+fn screencast_frame(b: &Arc<Browser>, params: &Value) {
+    use base64::Engine as _;
+    if let Some(data) = params.get("data").and_then(|d| d.as_str()) {
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) {
+            crate::screencast::push_frame(bytes);
+        }
+    }
+    if let Some(session) = params.get("sessionId") {
+        b.conn.send_nowait(
+            Some(&b.page_session),
+            "Page.screencastFrameAck",
+            json!({ "sessionId": session }),
+        );
+    }
 }
 
 /// An OOPIF or dedicated worker attached under the page.
@@ -812,6 +831,8 @@ fn exit_daemon() -> ! {
         let _ = std::fs::remove_file(crate::daemon::pid_file_path(&o.instance_id));
         let _ = std::fs::remove_file(launch::record_path(&o.instance_id));
     }
+    // An unfinished screencast is frames nothing will encode.
+    crate::screencast::discard_files();
     std::process::exit(0);
 }
 

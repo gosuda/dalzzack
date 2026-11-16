@@ -143,6 +143,7 @@ pub(crate) fn arm_ttl(instance_id: &str, secs: u64) {
         }
         let _ = std::fs::remove_file(port_file_path(&id));
         let _ = std::fs::remove_file(pid_file_path(&id));
+        crate::screencast::discard_files();
         std::process::exit(0);
     });
 }
@@ -744,8 +745,33 @@ pub fn start_daemon(
         "expires_at_ms": field("expires_at_ms"),
         "console_buffer": field("console_buffer"),
         "trusted_certs": field("trusted_certs"),
+        // What was asked for against what the window gave: a size it limits is
+        // said here, not discovered later in a screenshot.
+        "size": start_size_report(width, height, &live),
         "hint": hint,
     }))
+}
+
+/// `start`'s account of the page's size: the default 1200x800 unless asked for
+/// otherwise, against what the live daemon says it has. `null` for an engine with
+/// no native window of ours (Chrome).
+fn start_size_report(
+    width: Option<u32>,
+    height: Option<u32>,
+    live: &serde_json::Value,
+) -> serde_json::Value {
+    let measured = |key: &str| live["viewport"][key].as_f64();
+    let viewport = measured("width").zip(measured("height"));
+    if viewport.is_none() {
+        return serde_json::Value::Null;
+    }
+    crate::viewport::size_report(
+        (
+            u64::from(width.unwrap_or(1200)),
+            u64::from(height.unwrap_or(800)),
+        ),
+        viewport,
+    )
 }
 
 /// Where a daemon that fails during startup leaves its reason for `start`.
@@ -1216,6 +1242,8 @@ async fn handle_connection(
         // find this daemon still answering pings — and the port file goes
         // first, so nothing new connects meanwhile.
         let mut result = serde_json::json!({ "message": "Shutting down" });
+        // An unfinished recording is frames on disk that nothing will encode.
+        crate::screencast::abort().await;
         if crate::engine::is_chrome() {
             let _ = std::fs::remove_file(&port_file);
             result["chrome"] = crate::chrome::shutdown().await;
@@ -1288,12 +1316,19 @@ async fn handle_connection(
                 // enforcement".
                 "csp_bypassed": crate::state::csp_bypassed(),
                 "toolbar": crate::toolbar::is_enabled() && !crate::engine::is_chrome(),
+                // The page's size as the window has it, read natively.
+                "viewport": crate::viewport::current()
+                    .await
+                    .map(|(w, h)| serde_json::json!({ "width": w.round(), "height": h.round() })),
                 // `start --trust-cert`: what this WKWebView trusts on top of
                 // the system roots, so a test report can name it.
                 "trusted_certs": crate::trust_cert::report(),
                 // What sees a main-frame load that failed: the CDP network
                 // stream, the WKWebView delegate, or nothing.
                 "load_failure_capture": crate::main_frame::capture_word(),
+                // What feeds `nav-log`: `cdp` (every request), `webkit_navigations`
+                // (macOS: navigations only), or `unavailable`.
+                "nav_log": crate::netlog::transport().as_str(),
             }),
         };
         let resp_str = serde_json::to_string(&resp)?;

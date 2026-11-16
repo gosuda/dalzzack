@@ -187,10 +187,10 @@ enum Cli {
         /// Instance ID of the running daemon
         #[arg(long, short, default_value = "")]
         id: String,
-        /// New PAGE width in pixels (>= 100)
+        /// New PAGE width in pixels (>= 100; the page stays at 320 or more)
         #[arg(long)]
         width: u32,
-        /// New PAGE height in pixels (>= 100)
+        /// New PAGE height in pixels (>= 100; the page stays at 200 or more)
         #[arg(long)]
         height: u32,
     },
@@ -438,6 +438,31 @@ enum Cli {
         clear: bool,
     },
 
+    /// Record the page as an mp4 (`screencast start`, any commands, `screencast stop --output
+    /// a.mp4`). Page only, in real time. `record` is an event tape, not a recording.
+    /// `stop` uses the encoder that the OS has, else ffmpeg; with neither the frames are kept and
+    /// `stop` can be run again.
+    /// Example: `screencast start`, `scroll --amount 300` (repeat), `screencast stop --output docs.mp4`
+    Screencast {
+        /// start | stop | status
+        #[arg(value_parser = ["start", "stop", "status"], default_value = "status")]
+        action: String,
+        #[arg(long, short, default_value = "")]
+        id: String,
+        /// With `stop`: the mp4 to write (a relative path goes under the instance's folder).
+        #[arg(long)]
+        output: Option<String>,
+        /// With `start`: video frames per second, 1-60 (default 30).
+        #[arg(long)]
+        fps: Option<u32>,
+        /// With `start`: stop capturing after this many seconds, 1-600 (default 120).
+        #[arg(long = "max-seconds")]
+        max_seconds: Option<u64>,
+        /// With `start`: JPEG quality of the frames, 1-100 (default 80).
+        #[arg(long)]
+        quality: Option<u8>,
+    },
+
     /// Stop a running browser instance (graceful — sends __shutdown over TCP).
     /// If the daemon is hung and won't accept the shutdown, use `kill` instead.
     Stop {
@@ -512,7 +537,8 @@ enum Cli {
         click_type: String,
     },
 
-    /// Scroll the page or a specific element.
+    /// Scroll the element that really scrolls, or a specific one. The result says whether
+    /// anything `moved`, by how much (`scrolled`), and which `container` scrolled.
     /// Use --to for absolute positioning, or --direction + --amount for relative.
     /// Example: --to bottom --selector ".chat-container"
     /// Example: --direction down --amount 500
@@ -526,10 +552,11 @@ enum Cli {
         /// Scroll amount in pixels (default: 500)
         #[arg(long, default_value = "500", alias = "pixels")]
         amount: i32,
-        /// CSS selector to scroll within (default: page)
+        /// CSS selector to scroll within (default: the window while it can still move that
+        /// way, else the scroller under the middle of the page)
         #[arg(long)]
         selector: Option<String>,
-        /// Scroll to absolute position: top, bottom (overrides --direction/--amount)
+        /// Scroll to absolute position: top, bottom, left-end, right-end (overrides --direction/--amount)
         #[arg(long)]
         to: Option<String>,
     },
@@ -546,7 +573,7 @@ enum Cli {
         /// JavaScript code to execute (use 'return' to get a value, e.g. 'return document.title')
         #[arg(
             long,
-            alias = "code",
+            aliases = ["code", "js"],
             required_unless_present = "file",
             conflicts_with = "file"
         )]
@@ -846,7 +873,7 @@ enum Cli {
         #[arg(long)]
         name: String,
         /// JavaScript source to run at document start
-        #[arg(long, conflicts_with = "file")]
+        #[arg(long, aliases = ["code", "js"], conflicts_with = "file")]
         script: Option<String>,
         /// Read the script from a file instead of --script
         #[arg(long, conflicts_with = "script")]
@@ -1142,7 +1169,7 @@ enum Cli {
         #[arg(long, short, default_value = "")]
         id: String,
         /// JavaScript to evaluate (use 'return' to get a value).
-        #[arg(long, alias = "code")]
+        #[arg(long, aliases = ["code", "js"])]
         script: String,
         /// Execution timeout in ms (default 30000).
         #[arg(long, default_value = "30000")]
@@ -1155,7 +1182,7 @@ enum Cli {
         #[arg(long, short, default_value = "")]
         id: String,
         /// JS expression/body; a truthy return ends the wait (use 'return').
-        #[arg(long, alias = "js")]
+        #[arg(long, aliases = ["code", "js"])]
         script: String,
         /// Overall timeout in ms (default 30000).
         #[arg(long, default_value = "30000")]
@@ -1530,10 +1557,20 @@ fn emit_result(
     }
 }
 
-/// The first line of a clap error, which says what is wrong.
+/// The first line of a clap error, which says what is wrong, and clap's `tip:`
+/// when it has one ("a similar argument exists: '--script'"). The tip is what
+/// turns a typo into a one-step fix, and clap prints it to stderr only, which a
+/// reader of this JSON on stdout never sees.
 fn usage_message(e: &clap::Error) -> String {
     let text = e.render().to_string();
-    text.lines().next().unwrap_or("invalid usage").to_string()
+    let first = text.lines().next().unwrap_or("invalid usage");
+    match text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("tip:"))
+    {
+        Some(tip) => format!("{first} (tip:{tip})"),
+        None => first.to_string(),
+    }
 }
 
 fn main() {
@@ -2472,6 +2509,24 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
             "record".into(),
             serde_json::json!({ "action": action, "clear": clear }),
         ),
+        Cli::Screencast {
+            action,
+            id,
+            output,
+            fps,
+            max_seconds,
+            quality,
+        } => (
+            id,
+            "screencast".into(),
+            serde_json::json!({
+                "action": action,
+                "output": output,
+                "fps": fps,
+                "max_seconds": max_seconds,
+                "quality": quality,
+            }),
+        ),
         Cli::Cookies {
             action,
             id,
@@ -2684,7 +2739,7 @@ fn cli_to_tool_call(cmd: Cli) -> (String, String, serde_json::Value) {
 
 /// The parts of the guide that `install` leaves out, so that an agent pays for
 /// them only when it needs them: name, what it covers, text.
-const GUIDE_TOPICS: [(&str, &str, &str); 11] = [
+const GUIDE_TOPICS: [(&str, &str, &str); 12] = [
     (
         "instance",
         "start, stop, list, reset, resize, upgrade, install",
@@ -2729,6 +2784,11 @@ const GUIDE_TOPICS: [(&str, &str, &str); 11] = [
         "chrome",
         "drive a real Google Chrome with --engine chrome",
         include_str!("../guide/chrome.md"),
+    ),
+    (
+        "screencast",
+        "record the page as an mp4: screencast start, then stop",
+        include_str!("../guide/screencast.md"),
     ),
     (
         "output",
@@ -2985,6 +3045,56 @@ mod tests {
 
             let step = command_step(&json!(["get-html", "--selector", "h1"])).unwrap();
             assert_eq!(step.tool, "get_html");
+        });
+    }
+
+    #[test]
+    fn a_usage_error_carries_clap_s_did_you_mean() {
+        with_main_stack(|| {
+            let e = Args::try_parse_from(["dalzzack", "exec-js", "--scirpt", "1"])
+                .err()
+                .unwrap();
+            let message = usage_message(&e);
+            assert!(
+                message.contains("unexpected argument '--scirpt'")
+                    && message.contains("tip:")
+                    && message.contains("--script"),
+                "{message}"
+            );
+            // An error clap has no suggestion for gets no tip, and no stray second line.
+            let e = Args::try_parse_from(["dalzzack", "exec-js", "--no-such-flag-at-all-zzz"])
+                .err()
+                .unwrap();
+            let message = usage_message(&e);
+            assert!(message.contains("unexpected argument"), "{message}");
+            assert!(
+                !message.contains("tip:") && !message.contains('\n'),
+                "{message}"
+            );
+        });
+    }
+
+    #[test]
+    fn every_command_that_takes_javascript_accepts_all_three_names_for_it() {
+        with_main_stack(|| {
+            let commands: [&[&str]; 4] = [
+                &["exec-js"],
+                &["exec-js-isolated"],
+                &["wait-for-condition"],
+                &["inject-script", "--name", "n"],
+            ];
+            for flag in ["--script", "--code", "--js"] {
+                for command in commands {
+                    let mut words = vec!["dalzzack"];
+                    words.extend(command);
+                    words.extend([flag, "return 1"]);
+                    assert!(
+                        Args::try_parse_from(&words).is_ok(),
+                        "{} {flag} should parse",
+                        command[0]
+                    );
+                }
+            }
         });
     }
 

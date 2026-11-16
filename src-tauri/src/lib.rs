@@ -45,6 +45,8 @@ pub mod reset;
 /// Response headers captured from CDP — the only view of the navigation
 /// document's headers, where CSP/CORP/cache policy is decided.
 pub mod response_headers;
+/// `screencast`: the page as an mp4.
+pub mod screencast;
 pub mod site_data;
 pub mod state;
 pub mod sw_console;
@@ -60,6 +62,10 @@ pub mod ua;
 pub mod uninstall;
 /// `upgrade` — replace the binary with the latest release.
 pub mod upgrade;
+/// The size of the page a window shows, as the window has it.
+pub mod viewport;
+/// The navigation log on WKWebView: delegate callbacks as CDP-shaped events.
+pub mod webkit_nav;
 pub mod webview;
 
 // Re-export public API for backward compatibility

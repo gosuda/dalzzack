@@ -53,6 +53,9 @@ body{font-family:var(--sans);color:var(--ink);-webkit-font-smoothing:antialiased
 .cmd .p{color:var(--prompt)}
 .more{flex:none;font-size:11px;font-weight:800;color:var(--run-ink);background:rgba(169,138,244,.3);border-radius:10px;padding:2px 8px}
 .time{flex:none;font:12px var(--mono);color:var(--muted)}
+.rec{flex:none;display:flex;align-items:center;gap:6px;font-size:11px;font-weight:800;letter-spacing:.09em;
+  color:var(--fail-ink);background:rgba(255,127,159,.22);border-radius:10px;padding:2px 8px}
+.rec i{width:8px;height:8px;border-radius:50%;background:var(--fail);box-shadow:0 0 0 3px rgba(255,127,159,.25)}
 [hidden]{display:none!important}
 
 .s-running .dot{background:var(--run);box-shadow:0 0 0 3px rgba(169,138,244,.2)}
@@ -91,6 +94,7 @@ body{font-family:var(--sans);color:var(--ink);-webkit-font-smoothing:antialiased
   <span class="state" id="state">ready</span>
   <span class="cmd" id="cmd"></span>
   <span class="more" id="more" hidden></span>
+  <span class="rec" id="rec" hidden><i aria-hidden="true"></i><span id="rectime"></span></span>
   <span class="time" id="time"></span>
 </div>
 <script>
@@ -115,9 +119,17 @@ body{font-family:var(--sans);color:var(--ink);-webkit-font-smoothing:antialiased
     if (on) { el.setAttribute("tabindex", "0"); } else { el.setAttribute("tabindex", "-1"); }
   }
 
+  function clock(ms) {
+    var s = Math.max(0, Math.floor(ms / 1000)), m = Math.floor(s / 60);
+    return (m < 10 ? "0" : "") + m + ":" + (s % 60 < 10 ? "0" : "") + (s % 60);
+  }
+
   function tick() {
     if (cur && cur.activity.state === "running") {
       $("time").textContent = seconds(Date.now() - cur.activity.since);
+    }
+    if (cur && cur.recording) {
+      $("rectime").textContent = "REC " + clock(Date.now() - cur.recording);
     }
   }
 
@@ -154,11 +166,15 @@ body{font-family:var(--sans);color:var(--ink);-webkit-font-smoothing:antialiased
     more.hidden = !(a.more > 0);
     more.textContent = a.more > 0 ? "+" + a.more + " more" : "";
 
-    if (a.state === "running") {
+    var recording = !!s.recording;
+    $("rec").hidden = !recording;
+    if (a.state === "running" || recording) {
       tick();
       if (!ticker) { ticker = setInterval(tick, 100); }
-    } else {
-      if (ticker) { clearInterval(ticker); ticker = null; }
+    } else if (ticker) {
+      clearInterval(ticker); ticker = null;
+    }
+    if (a.state !== "running") {
       $("time").textContent = a.state === "idle" ? "" : seconds(a.took);
     }
   }

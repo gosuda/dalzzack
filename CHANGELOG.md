@@ -4,6 +4,83 @@ All notable changes to dalzzack. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [SemVer](https://semver.org).
 
+## [Unreleased]
+
+### Added
+
+- `screencast stop` makes the mp4 with the encoder that the OS has (Media Foundation
+  on Windows, AVFoundation on macOS), so ffmpeg is no longer needed. ffmpeg is the
+  fallback when the OS has none (a Windows N edition without the Media Feature Pack)
+  or it fails. `DALZZACK_ENCODER=native` or `ffmpeg` (set before `start`) allows
+  only that one. `stop` says which one made the file: `encoder`, and `ffmpeg_encoder`
+  when it was ffmpeg.
+- ffmpeg builds without libx264 work: `stop` picks the best H.264 encoder that the
+  build has (`libx264`, then `libopenh264`, `h264_videotoolbox`, `h264_mf`), so a
+  small LGPL build is enough. It used to need `libx264`.
+
+### Changed
+
+- The video's colours are converted and tagged as BT.709 (limited range) by both
+  encoders. ffmpeg used to convert with BT.601 and leave the file untagged, so a
+  player that assumes BT.709 for HD video showed shifted colours.
+
+### Fixed
+
+- A video made by ffmpeg ran one hold of the last frame longer than the recording
+  (0.3 s to 0.9 s in the tests): ffmpeg now writes exactly the frames of the
+  recorded span.
+
+## [1.5.0] - 2026-11-15
+
+### Added
+
+- `scroll` finds the element that really scrolls: the window while it can still
+  move that way, else the scrollable element under the middle of the page (a
+  documentation site whose text scrolls inside `#page`), else the largest scroller.
+  A page that locks its window scroll is not scrolled through the window, and a
+  `<body>` that scrolls on its own is scrolled as an element. Its answer is
+  measured: `moved`, `scrolled` (the real distance), `requested`, `container`,
+  `at_start`, `at_end`, and a `hint` plus (without `--selector`) `scrollables` when
+  nothing moved. `--selector` always wins; `element` and `container` now name the
+  element as `#id` or `tag.class` (not the selector you passed). `--to left-end|
+  right-end` are now in the help.
+- `start` and `resize` report the size the page really got (`size`/`viewport`,
+  `exact`, and a `note` when the window limited it), read natively from the page's
+  webview. The narrowest window is now 320 px wide (it was 400), so phone widths
+  work. This is viewport size only: no touch, pixel-ratio or user-agent emulation.
+- A usage error on stdout carries clap's "did you mean" tip, and `--script`,
+  `--code` and `--js` are accepted by every command that takes JavaScript.
+- `nav-log` works on macOS. The WKWebView navigation delegate now feeds the log,
+  so macOS shows the redirect chain (each hop's `location`), the final response's
+  status and headers, a bot challenge (`cf-mitigated`), a self-solving challenge as
+  its second navigation, iframe navigations, and failed loads, with no page
+  JavaScript involved. WebKit does not report a redirect's own status, so a hop
+  shows its `location` and no `status`, and subresource requests are not in the log
+  (`source`, `coverage` and `limits` say so). `navigate` gains its `document` chain
+  and `challenge` on macOS, and `list` reports `nav_log` and a live `current_url`.
+
+- `screencast start|stop|status`: record the page as an mp4. Run commands (scroll,
+  click, navigate) between `start` and `stop --output FILE`. Page only (not the
+  window, the toolbar or the screen), H.264 `yuv420p`, in real time, at the page's
+  size in CSS pixels. On macOS it takes WebKit snapshots of the page (captured at
+  up to about 55 frames a second, with the window in front, in the background or covered);
+  on `--engine chrome` it uses CDP `Page.startScreencast`. ffmpeg makes the file at
+  `stop`; without it the frames are kept (`FFMPEG_NOT_FOUND`) and `stop` can be run
+  again. Capture ends by itself at `--max-seconds` (default 120). While it records,
+  the window's toolbar shows `REC` and the time. The Windows default engine
+  answers `UNSUPPORTED_PLATFORM`; use `--engine chrome` there.
+
+### Changed
+
+- `scroll`'s `scrolled` is now the distance that was measured, not an echo of the
+  distance asked for (that is `requested`). A scroll that moved nothing used to say
+  `completed` with no sign of it.
+
+### Fixed
+
+- `scroll --selector` with a quote in the selector (`p[data-x='y']`) broke the
+  script it was pasted into. The selector now travels as JSON.
+
 ## [1.4.0] - 2026-11-12
 
 ### Added

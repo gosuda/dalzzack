@@ -203,11 +203,65 @@ static STORE: Mutex<Store> = Mutex::new(Store {
     dropped_requests: 0,
 });
 
+/// What feeds the log. They are not equal: CDP sees every request, while
+/// WKWebView's navigation delegate sees navigations only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// Nothing: an empty timeline means nothing at all.
+    None,
+    /// CDP `Network.*` / `Page.*` events: every request.
+    Cdp,
+    /// The WKWebView navigation delegate: main-frame and iframe navigations.
+    WebkitNavigations,
+}
+
+impl Transport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Transport::None => "unavailable",
+            Transport::Cdp => "cdp",
+            Transport::WebkitNavigations => "webkit_navigations",
+        }
+    }
+}
+
+static TRANSPORT: Mutex<Transport> = Mutex::new(Transport::None);
+
+pub fn transport() -> Transport {
+    TRANSPORT.lock().map(|t| *t).unwrap_or(Transport::None)
+}
+
+/// Does the log see subresource requests (scripts, images, fetch), or only
+/// navigations? `failed-requests` and anything else that claims to cover every
+/// request asks this, not [`is_armed`].
+pub fn has_subresources() -> bool {
+    transport() == Transport::Cdp
+}
+
 /// Record that the event stream feeding this module came up. Without it an
-/// empty timeline is indistinguishable from "nothing was loaded".
+/// empty timeline is indistinguishable from "nothing was loaded". This is the
+/// CDP stream; see [`arm_webkit_navigations`] for macOS.
 pub fn set_armed(armed: bool) {
     if let Ok(mut s) = STORE.lock() {
         s.armed = armed;
+    }
+    if let Ok(mut t) = TRANSPORT.lock() {
+        *t = if armed {
+            Transport::Cdp
+        } else {
+            Transport::None
+        };
+    }
+}
+
+/// The macOS navigation delegate is feeding the log (navigations only).
+pub fn arm_webkit_navigations() {
+    if let Ok(mut s) = STORE.lock() {
+        s.armed = true;
+        s.main_frame_id = Some("main".to_string());
+    }
+    if let Ok(mut t) = TRANSPORT.lock() {
+        *t = Transport::WebkitNavigations;
     }
 }
 
@@ -445,6 +499,11 @@ impl Store {
 /// whole stream through.
 pub fn ingest(event: &str, params: &Value) {
     let ts_ms = crate::recording::cdp_event_ts_ms(params);
+    // WebKit's navigation delegate says nothing of pushState and hash changes,
+    // so a URL taken from its commits goes stale; without one, callers read the
+    // page's own location instead.
+    let commits_set_current_url =
+        event == "Page.frameNavigated" && transport() != Transport::WebkitNavigations;
     let Ok(mut s) = STORE.lock() else { return };
     match event {
         "Network.requestWillBeSent" => on_request(&mut s, params, ts_ms),
@@ -533,11 +592,19 @@ pub fn ingest(event: &str, params: &Value) {
             // A top-level document that failed is what `navigate` and
             // `wait-navigation` must report (see `crate::main_frame`).
             let main = s.main_frame_id.clone();
+            // The macOS delegate records a failed load itself, with more than an
+            // event can say (the certificate, the error domain); its event only
+            // closes the request.
+            let already_recorded = params
+                .get("alreadyRecorded")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
             let failed_document = s
                 .nav_records
                 .get(&id)
                 .filter(|r| main.is_none() || r.frame_id.is_none() || r.frame_id == main)
-                .map(|r| r.url().to_string());
+                .map(|r| r.url().to_string())
+                .filter(|_| !already_recorded);
             if let Some(url) = failed_document {
                 crate::main_frame::record(crate::main_frame::Failure {
                     ts_ms,
@@ -594,8 +661,10 @@ pub fn ingest(event: &str, params: &Value) {
             let is_top = frame.get("parentId").is_none();
             if is_top {
                 s.main_frame_id = Some(frame_id.clone());
-                s.current_url = Some(url.clone());
-                s.current_url_ms = Some(ts_ms);
+                if commits_set_current_url {
+                    s.current_url = Some(url.clone());
+                    s.current_url_ms = Some(ts_ms);
+                }
             }
             if let Some(loader) = str_at(&frame, "loaderId") {
                 if !s.mark_committed(&loader, &url, ts_ms) {
@@ -1625,5 +1694,79 @@ mod tests {
     fn cookie_header_redaction_keeps_names() {
         assert_eq!(redact_cookie_header("a=1; b=xyz"), "a=…[1]; b=…[3]");
         assert_eq!(redact_cookie_header("flag"), "…[4]");
+    }
+
+    /// The macOS source end to end: WebKit's callbacks, through the tracker, into
+    /// the timeline `nav-log` prints.
+    #[test]
+    fn webkit_navigations_read_as_a_timeline_whose_hops_have_no_status() {
+        use crate::webkit_nav::{Event, Response, Tracker};
+        let _g = SERIAL.lock().unwrap();
+
+        // The transport and the store's stream state are process-wide: put them back.
+        struct Restore(Transport, bool, Option<String>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                *TRANSPORT.lock().unwrap_or_else(|e| e.into_inner()) = self.0;
+                let mut s = STORE.lock().unwrap_or_else(|e| e.into_inner());
+                s.armed = self.1;
+                s.main_frame_id = self.2.take();
+            }
+        }
+        let _restore = {
+            let s = STORE.lock().unwrap();
+            Restore(transport(), s.armed, s.main_frame_id.clone())
+        };
+        clear();
+        arm_webkit_navigations();
+        let before = last_seq();
+        let feed = |events: Vec<Event>| {
+            for e in events {
+                ingest(e.name, &e.params);
+            }
+        };
+        let page = Response {
+            url: "http://h/page".into(),
+            status: Some(200),
+            mime_type: Some("text/html".into()),
+            headers: Default::default(),
+        };
+
+        let mut t = Tracker::new();
+        // A slow page, replaced before it answered by a navigation that
+        // redirects twice; WebKit's late cancel of the slow one changes nothing.
+        feed(t.started(1, "http://h/slow"));
+        feed(t.started(2, "http://h/"));
+        feed(t.failed(1, "cancelled", true));
+        feed(t.redirected(2, "http://h/hop2"));
+        feed(t.redirected(2, "http://h/page"));
+        feed(t.response(&page, true));
+        feed(t.commit("http://h/page"));
+        feed(t.finished());
+
+        let navs = navigations(&NavQuery {
+            after_seq: Some(before),
+            max: 10,
+            ..Default::default()
+        });
+        assert_eq!(navs.len(), 2, "{navs:#?}");
+        assert_eq!(
+            navs[0]["redirects"], 0,
+            "the slow page is not a hop of the next"
+        );
+        let n = &navs[1];
+        assert_eq!(n["redirects"], 2, "{n:#?}");
+        assert_eq!(n["status"], 200);
+        assert_eq!(n["committed"], true);
+        let hops = n["hops"].as_array().unwrap();
+        assert_eq!(hops[0]["kind"], "redirect");
+        assert_eq!(hops[0]["key_headers"]["location"], "http://h/hop2");
+        assert!(
+            hops[0].get("status").is_none_or(Value::is_null),
+            "{hops:#?}"
+        );
+        assert_eq!(hops[2]["kind"], "response");
+        // A WebKit commit leaves the current URL to the page's own location.
+        assert_eq!(current_url().0, None);
     }
 }

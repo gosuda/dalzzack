@@ -6,7 +6,7 @@
 - `keyboard --text "hello"` | `keyboard --text "long" --paste` — type or paste text
 - `keyboard --key Enter [--modifiers ctrl,shift]` — press special keys
 - `keyboard --key Tab --native` — a native key press the page receives with `isTrusted: true` (the plain one is a JS event, `false`): an NSEvent on macOS, CDP `Input.dispatchKeyEvent` on Windows WebView2; not on Linux. Focus crosses into cross-origin iframes and closed shadow roots. No Accessibility permission; the mouse does not move. Named keys only, not `--text`. A Cloudflare Turnstile checkbox: `--key Tab --native`, then `--key Space --native`. The Chrome engine's keys are always trusted.
-- `scroll --to top|bottom [--selector CSS]` — absolute scroll
-- `scroll [--direction down] [--amount 500] [--selector CSS]` — relative scroll
+- `scroll --to top|bottom|left-end|right-end [--selector CSS]` — absolute scroll
+- `scroll [--direction down] [--amount 500] [--selector CSS]` — relative scroll. It scrolls the element that really scrolls: the window while it can still move that way, else the scrollable element under the middle of the page (a docs site whose text scrolls inside `#page`), else the largest scroller. The result is measured: `moved`, `scrolled` (the real distance; `requested` is what you asked), `container`, `at_start`/`at_end`. When nothing moved it says why and (without `--selector`) lists `scrollables`. It acts on this document, not inside an iframe. `--selector` always wins.
 - `upload-file --selector "input[type=file]" --file PATH`
 - `save-image --selector CSS --output PATH [--index -1]` — save DOM image (default: last match)

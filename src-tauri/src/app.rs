@@ -313,6 +313,7 @@ footer code{font-size:13px;color:var(--ink);background:rgba(255,255,255,.7);bord
       <li><code>resize</code><span>Change the window size</span></li>
       <li><code>reset</code><span>Back to a first-visit state</span></li>
       <li><code>record</code><span>Turn the event tape on/off</span></li>
+      <li><code>screencast</code><span>Record the page as an mp4</span></li>
     </ul></div>
     <div class="g c2"><div class="gbar"><i></i><i></i><i></i><h3><b></b>Navigate</h3></div><ul>
       <li><code>navigate</code><span>Open a URL and wait</span></li>
@@ -586,7 +587,10 @@ pub fn run_with_instance_id(opts: AppOptions) {
             let window = builder
                 .title(&window_title)
                 .inner_size(win_width, win_height)
-                .min_inner_size(400.0, 300.0 + bar_height)
+                .min_inner_size(
+                    crate::toolbar::MIN_PAGE_WIDTH,
+                    crate::toolbar::MIN_PAGE_HEIGHT + bar_height,
+                )
                 .resizable(true)
                 .center()
                 // With a toolbar the window is resized once, when it exists and
@@ -597,10 +601,16 @@ pub fn run_with_instance_id(opts: AppOptions) {
                 // The toolbar's address follows the page's own load events.
                 .on_page_load(|_, payload| {
                     use tauri::webview::PageLoadEvent;
-                    crate::toolbar::note_load(
-                        payload.url(),
-                        matches!(payload.event(), PageLoadEvent::Started),
-                    );
+                    let started = matches!(payload.event(), PageLoadEvent::Started);
+                    crate::toolbar::note_load(payload.url(), started);
+                    // On macOS the page's own load events close the navigation log's
+                    // entries: a commit, and a finish.
+                    #[cfg(target_os = "macos")]
+                    if started {
+                        crate::platform::wk_nav::page_committed(payload.url().as_str());
+                    } else {
+                        crate::platform::wk_nav::page_finished();
+                    }
                 })
                 // Enable F12 / right-click "Inspect" / attach-devtools. Effective
                 // only when the `tauri/devtools` feature is on (see Cargo.toml —
@@ -639,6 +649,8 @@ pub fn run_with_instance_id(opts: AppOptions) {
                         let _ = std::fs::remove_file(crate::daemon::pid_file_path(id));
                         tracing::info!("Window closed — daemon shutting down (id: {})", id);
                     }
+                    // An unfinished screencast is frames nothing will encode.
+                    crate::screencast::discard_files();
                     std::process::exit(0);
                 }
             });

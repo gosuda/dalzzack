@@ -139,6 +139,8 @@ pub fn install(webview: &tauri::WebviewWindow) -> Result<(), String> {
                 );
             }
 
+            super::wk_nav::install(class, webview);
+
             // WebKit reads which methods a delegate has when it is set.
             let _: () =
                 msg_send![webview, setNavigationDelegate: std::ptr::null_mut::<AnyObject>()];
@@ -162,14 +164,20 @@ pub(super) unsafe fn ns_string(obj: *mut AnyObject) -> Option<String> {
 unsafe extern "C-unwind" fn did_fail_provisional(
     _this: *mut AnyObject,
     _cmd: Sel,
-    _webview: *mut AnyObject,
+    webview: *mut AnyObject,
     navigation: *mut AnyObject,
     error: *mut AnyObject,
 ) {
-    let _ = catch_unwind(AssertUnwindSafe(|| record_failure(navigation, error)));
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        record_failure(webview, navigation, error)
+    }));
 }
 
-unsafe fn record_failure(navigation: *mut AnyObject, error: *mut AnyObject) {
+unsafe fn record_failure(
+    webview: *mut AnyObject,
+    navigation: *mut AnyObject,
+    error: *mut AnyObject,
+) {
     if error.is_null() {
         return;
     }
@@ -192,6 +200,7 @@ unsafe fn record_failure(navigation: *mut AnyObject, error: *mut AnyObject) {
         (url, peer)
     };
     let canceled = main_frame::webkit_canceled(&domain, code as i64);
+    super::wk_nav::load_failed(webview, navigation, &message, canceled);
     let wants_trust = !peer.is_null() && !canceled;
     tracing::info!(
         "[wk-delegate] main-frame load failed: {domain} {code} {:?}",
