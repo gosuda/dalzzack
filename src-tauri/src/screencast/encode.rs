@@ -7,6 +7,7 @@
 //! result is resampled to a constant frame rate. That keeps the video in real
 //! time whatever the capture rate was.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// One captured frame: where it is and when it arrived.
@@ -205,8 +206,8 @@ pub async fn probe_h264(ffmpeg: &Path) -> Option<H264> {
     pick_h264(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Where ffmpeg is: `DALZZACK_FFMPEG`, else `PATH`, else the usual install
-/// folders (a daemon started from a GUI may not have the shell's `PATH`).
+/// Where ffmpeg is: `DALZZACK_FFMPEG`, else `PATH`, else winget's links folder on
+/// Windows, else the usual install folders.
 pub fn find_ffmpeg() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("DALZZACK_FFMPEG").map(PathBuf::from) {
         return explicit.is_file().then_some(explicit);
@@ -216,21 +217,55 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
     } else {
         "ffmpeg"
     };
-    let mut folders: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    for usual in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
-        folders.push(PathBuf::from(usual));
-    }
-    folders
+    let local_app_data = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else {
+        None
+    };
+    candidate_folders(std::env::var_os("PATH"), local_app_data)
         .into_iter()
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
 }
 
+/// The folders ffmpeg may be in, in the order to look. A daemon's `PATH` is only as
+/// new as the daemon, so an ffmpeg installed after it started is found through
+/// winget's links folder, where winget puts the command's shim.
+fn candidate_folders(path: Option<OsString>, local_app_data: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = path
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    if let Some(local) = local_app_data {
+        folders.push(local.join("Microsoft").join("WinGet").join("Links"));
+    }
+    for usual in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+        folders.push(PathBuf::from(usual));
+    }
+    folders
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn winget_links_are_searched_after_the_path_and_before_the_usual_folders() {
+        let folders = candidate_folders(Some(OsString::from("/a")), Some(PathBuf::from("/local")));
+        let links = PathBuf::from("/local")
+            .join("Microsoft")
+            .join("WinGet")
+            .join("Links");
+        assert_eq!(folders[0], PathBuf::from("/a"));
+        assert_eq!(folders[1], links);
+        assert_eq!(folders[2], PathBuf::from("/opt/homebrew/bin"));
+    }
+
+    #[test]
+    fn no_local_app_data_means_no_winget_folder() {
+        let folders = candidate_folders(Some(OsString::from("/a")), None);
+        assert_eq!(folders[0], PathBuf::from("/a"));
+        assert_eq!(folders[1], PathBuf::from("/opt/homebrew/bin"));
+    }
 
     fn frame(offset_ms: u64, name: &str) -> FrameMeta {
         FrameMeta {
