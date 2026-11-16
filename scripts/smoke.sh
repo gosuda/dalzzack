@@ -240,36 +240,40 @@ if not (d.get("moved") is True and d.get("at_end") is True and d["scrolled"]["dy
 '
 
 step "screencast records a scroll as an mp4"
-# Needs ffmpeg to encode (skipped without it) and a screencast source for this
-# engine (the Windows default engine has none yet and says so).
-if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "ffmpeg is not installed: skipping the screencast check"
+# `stop` encodes with the encoder that the OS has (ffmpeg is only the fallback), so
+# no ffmpeg is needed. A screencast source is: the Windows default engine has none
+# and says so.
+START=$(dalzzack screencast start -i "$ID" || true)
+if printf '%s' "$START" | grep -q UNSUPPORTED_PLATFORM; then
+  echo "no screencast source on this platform: skipping"
 else
-  START=$(dalzzack screencast start -i "$ID" || true)
-  if printf '%s' "$START" | grep -q UNSUPPORTED_PLATFORM; then
-    echo "no screencast source on this platform: skipping"
-  else
-    printf '%s' "$START" | python3 -c '
+  printf '%s' "$START" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 if d.get("status") != "started":
     raise SystemExit(f"FAIL: screencast start: {d}")
 '
-    dalzzack scroll -i "$ID" --to top >/dev/null
-    for _ in 1 2 3 4 5 6; do dalzzack scroll -i "$ID" --amount 100 >/dev/null; sleep 0.3; done
-    dalzzack screencast stop -i "$ID" --output "$WORKDIR/smoke.mp4" | python3 -c '
+  dalzzack scroll -i "$ID" --to top >/dev/null
+  for _ in 1 2 3 4 5 6; do dalzzack scroll -i "$ID" --amount 100 >/dev/null; sleep 0.3; done
+  dalzzack screencast stop -i "$ID" --output "$WORKDIR/smoke.mp4" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 if d.get("status") != "completed" or d.get("frames", 0) < 3:
     raise SystemExit(f"FAIL: screencast stop: {d}")
-print("recorded", d["frames"], "frames,", d["duration_ms"], "ms")
+if d.get("encoder") not in ("native", "ffmpeg"):
+    raise SystemExit(f"FAIL: screencast stop did not say which encoder it used: {d}")
+print("recorded", d["frames"], "frames,", d["duration_ms"], "ms, encoder", d["encoder"])
 '
+  test -s "$WORKDIR/smoke.mp4" || { echo "FAIL: the video is empty" >&2; exit 1; }
+  if command -v ffprobe >/dev/null 2>&1; then
     PROBE=$(ffprobe -v error -show_entries stream=codec_name,pix_fmt:format=duration -of csv=p=0 "$WORKDIR/smoke.mp4" | tr '\n' ' ')
     echo "mp4: $PROBE"
     case "$PROBE" in
       h264,yuv420p*) ;;
       *) echo "FAIL: expected an H.264 yuv420p video, got: $PROBE" >&2; exit 1 ;;
     esac
+  else
+    echo "ffprobe is not installed: the video was not probed"
   fi
 fi
 
