@@ -45,13 +45,108 @@ pub fn concat_list(frames: &[FrameMeta], end_ms: u64, fps: u32) -> String {
     out
 }
 
+/// For every tick of a constant frame rate, the index of the frame that is on
+/// screen: the latest one that arrived at or before that tick. The video starts at
+/// the first frame and ends when capture ended, and a page that stopped changing
+/// is held to the end. It is never shorter than one frame time.
+///
+/// Both encoders follow this plan: the OS encoder writes exactly these ticks, and
+/// ffmpeg is limited to as many frames (`-frames:v`). Without that limit ffmpeg
+/// ran one hold of the last frame too long.
+pub fn plan(frames: &[FrameMeta], end_ms: u64, fps: u32) -> Vec<usize> {
+    let Some(first) = frames.first() else {
+        return Vec::new();
+    };
+    let fps = u64::from(fps.max(1));
+    let one_frame_ms = (1000 / fps).max(1);
+    let span_ms = end_ms.saturating_sub(first.offset_ms).max(one_frame_ms);
+    let count = (span_ms * fps).div_ceil(1000).max(1);
+    let mut at = 0usize;
+    (0..count)
+        .map(|tick| {
+            let now = first.offset_ms + tick * 1000 / fps;
+            while at + 1 < frames.len() && frames[at + 1].offset_ms <= now {
+                at += 1;
+            }
+            at
+        })
+        .collect()
+}
+
+/// An H.264 encoder that an ffmpeg build can have. A full (GPL) build has
+/// libx264. A small (LGPL) build has no libx264 and brings libopenh264, or uses the
+/// encoder of the OS, so a small build is enough when we pick from what it has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum H264 {
+    X264,
+    OpenH264,
+    VideoToolbox,
+    MediaFoundation,
+}
+
+impl H264 {
+    /// In the order of preference: smallest file first, and the OS encoders last.
+    /// Hardware encoders (NVENC, QSV, AMF) are left out: they need the hardware.
+    const ALL: [H264; 4] = [
+        H264::X264,
+        H264::OpenH264,
+        H264::VideoToolbox,
+        H264::MediaFoundation,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            H264::X264 => "libx264",
+            H264::OpenH264 => "libopenh264",
+            H264::VideoToolbox => "h264_videotoolbox",
+            H264::MediaFoundation => "h264_mf",
+        }
+    }
+
+    fn options(self) -> &'static [&'static str] {
+        match self {
+            H264::X264 => &["-preset", "veryfast", "-crf", "23"],
+            H264::OpenH264 => &["-b:v", "4M"],
+            H264::VideoToolbox => &["-b:v", "4M"],
+            H264::MediaFoundation => &["-rate_control", "quality", "-quality", "70"],
+        }
+    }
+}
+
+/// The best H.264 encoder that the output of `ffmpeg -hide_banner -encoders` lists.
+pub fn pick_h264(listing: &str) -> Option<H264> {
+    let names: Vec<&str> = listing
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let flags = words.next()?;
+            let name = words.next()?;
+            // The first letter of the flags is the kind: `V` is a video encoder.
+            flags.starts_with('V').then_some(name)
+        })
+        .collect();
+    H264::ALL.into_iter().find(|e| names.contains(&e.name()))
+}
+
 /// ffmpeg's arguments: H.264 in yuv420p (what every player and editor takes),
-/// both sides even (yuv420p needs it), a constant `fps`.
-pub fn ffmpeg_args(list: &Path, output: &Path, fps: u32) -> Vec<String> {
+/// both sides even (yuv420p needs it), a constant `fps` of exactly `ticks` frames
+/// (see [`plan`]), and BT.709 colour, the same as the OS encoder makes.
+pub fn ffmpeg_args(
+    list: &Path,
+    output: &Path,
+    fps: u32,
+    ticks: usize,
+    encoder: H264,
+) -> Vec<String> {
     // `out_range=tv`: JPEG is full-range, and without the conversion ffmpeg keeps
-    // it as yuvj420p, which some players and editors misread.
-    let filter = format!("fps={fps},scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=tv,format=yuv420p");
-    [
+    // it as yuvj420p, which some players and editors misread. `out_color_matrix`
+    // and the tags say which colours these are: without them a player guesses BT.709
+    // for HD video, and ffmpeg's own default matrix (BT.601) shifts the colours.
+    let filter = format!(
+        "fps={fps},scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=tv:out_color_matrix=bt709,\
+         format=yuv420p"
+    );
+    let mut args: Vec<String> = [
         "-y",
         "-v",
         "error",
@@ -63,23 +158,51 @@ pub fn ffmpeg_args(list: &Path, output: &Path, fps: u32) -> Vec<String> {
         &list.to_string_lossy(),
         "-vf",
         &filter,
+        "-frames:v",
+        &ticks.to_string(),
         "-c:v",
-        "libx264",
-        // JPEG frames are full-range, which ffmpeg would keep as yuvj420p; players
-        // and editors expect plain yuv420p.
-        "-pix_fmt",
-        "yuv420p",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "23",
-        "-movflags",
-        "+faststart",
-        &output.to_string_lossy(),
+        encoder.name(),
     ]
     .iter()
     .map(|s| s.to_string())
-    .collect()
+    .collect();
+    args.extend(encoder.options().iter().map(|s| s.to_string()));
+    args.extend(
+        [
+            // JPEG frames are full-range, which ffmpeg would keep as yuvj420p; players
+            // and editors expect plain yuv420p.
+            "-pix_fmt",
+            "yuv420p",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-movflags",
+            "+faststart",
+            &output.to_string_lossy(),
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    args
+}
+
+/// The best H.264 encoder in this ffmpeg, or `None` when it has none (or cannot
+/// be run).
+pub async fn probe_h264(ffmpeg: &Path) -> Option<H264> {
+    let run = tokio::process::Command::new(ffmpeg)
+        .args(["-hide_banner", "-encoders"])
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(20), run)
+        .await
+        .ok()?
+        .ok()?;
+    pick_h264(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// Where ffmpeg is: `DALZZACK_FFMPEG`, else `PATH`, else the usual install
@@ -174,17 +297,153 @@ mod tests {
 
     #[test]
     fn the_video_is_even_sided_h264_at_a_constant_rate() {
-        let args = ffmpeg_args(Path::new("/t/list.txt"), Path::new("/t/out.mp4"), 24);
+        let args = ffmpeg_args(
+            Path::new("/t/list.txt"),
+            Path::new("/t/out.mp4"),
+            24,
+            96,
+            H264::X264,
+        );
         let joined = args.join(" ");
         assert!(
             joined.contains("-f concat -safe 0 -i /t/list.txt"),
             "{joined}"
         );
         assert!(
-            joined.contains("fps=24,scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=tv,format=yuv420p"),
+            joined.contains(
+                "fps=24,scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=tv:out_color_matrix=bt709,\
+                 format=yuv420p"
+            ),
             "{joined}"
         );
-        assert!(joined.contains("-c:v libx264") && joined.ends_with("/t/out.mp4"));
+        assert!(
+            joined.contains("-frames:v 96 -c:v libx264 -preset veryfast -crf 23"),
+            "{joined}"
+        );
+        assert!(
+            joined.ends_with("-movflags +faststart /t/out.mp4"),
+            "{joined}"
+        );
         assert!(joined.contains("-pix_fmt yuv420p"), "{joined}");
+    }
+
+    #[test]
+    fn the_colours_are_converted_and_tagged_as_bt709() {
+        // The matrix of the conversion and the tag must agree, or the colours shift.
+        let joined = ffmpeg_args(
+            Path::new("/t/l.txt"),
+            Path::new("/t/o.mp4"),
+            30,
+            1,
+            H264::OpenH264,
+        )
+        .join(" ");
+        assert!(joined.contains("out_color_matrix=bt709"), "{joined}");
+        assert!(
+            joined.contains(
+                "-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv"
+            ),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn each_encoder_gets_its_own_options_and_no_other() {
+        let args = |e| ffmpeg_args(Path::new("l"), Path::new("o"), 30, 1, e).join(" ");
+        assert!(args(H264::OpenH264).contains("-c:v libopenh264 -b:v 4M"));
+        assert!(args(H264::VideoToolbox).contains("-c:v h264_videotoolbox -b:v 4M"));
+        assert!(
+            args(H264::MediaFoundation).contains("-c:v h264_mf -rate_control quality -quality 70")
+        );
+        for other in [H264::OpenH264, H264::VideoToolbox, H264::MediaFoundation] {
+            assert!(!args(other).contains("-crf"), "{other:?} has no -crf");
+            assert!(!args(other).contains("-preset"), "{other:?} has no -preset");
+        }
+    }
+
+    // The lines of `ffmpeg -encoders`, cut down.
+    const FULL_BUILD: &str = " V....D libx264              libx264 H.264 / AVC (codec h264)\n \
+         V....D h264_mf              H264 via MediaFoundation (codec h264)\n \
+         V....D h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)\n \
+         A....D aac                  AAC (Advanced Audio Coding)\n";
+    const SMALL_BUILD: &str = " V....D libopenh264          OpenH264 H.264 / AVC (codec h264)\n \
+         V....D h264_amf             AMD AMF H.264 Encoder (codec h264)\n \
+         V....D h264_mf              H264 via MediaFoundation (codec h264)\n";
+    const OS_ONLY_BUILD: &str = " V....D h264_nvenc           NVIDIA NVENC H.264 encoder\n \
+         V....D h264_videotoolbox    VideoToolbox H.264 Encoder (codec h264)\n";
+
+    #[test]
+    fn the_best_encoder_that_the_build_has_is_picked() {
+        assert_eq!(pick_h264(FULL_BUILD), Some(H264::X264));
+        assert_eq!(pick_h264(SMALL_BUILD), Some(H264::OpenH264));
+        assert_eq!(pick_h264(OS_ONLY_BUILD), Some(H264::VideoToolbox));
+        assert_eq!(
+            pick_h264(" V....D h264_mf  x\n"),
+            Some(H264::MediaFoundation)
+        );
+    }
+
+    #[test]
+    fn a_build_with_no_usable_h264_encoder_gives_none() {
+        // Hardware encoders alone are not enough, an audio line named like an
+        // encoder is not a video encoder, and an empty listing has nothing.
+        assert_eq!(
+            pick_h264(" V....D h264_nvenc  NVENC\n V....D h264_qsv  QSV\n"),
+            None
+        );
+        assert_eq!(pick_h264(" A....D libx264  not video\n"), None);
+        assert_eq!(pick_h264(""), None);
+    }
+
+    #[test]
+    fn every_tick_shows_the_latest_frame_that_has_arrived() {
+        // 10 fps, a tick every 100 ms: frame 1 arrives at 400, frame 2 at 1000.
+        let ticks = plan(
+            &[frame(0, "a"), frame(400, "b"), frame(1000, "c")],
+            1500,
+            10,
+        );
+        assert_eq!(ticks, [0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2]);
+    }
+
+    #[test]
+    fn a_page_that_stopped_changing_is_held_to_the_end_of_the_plan() {
+        // One frame, then nothing for 4 seconds: 4 seconds of that frame.
+        let ticks = plan(&[frame(100, "only")], 4100, 30);
+        assert_eq!(ticks.len(), 120);
+        assert!(ticks.iter().all(|&i| i == 0));
+    }
+
+    #[test]
+    fn the_video_runs_from_the_first_frame_not_from_the_start_of_capture() {
+        // Capture began at 0 but the page first painted at 2000: no empty lead-in.
+        assert_eq!(plan(&[frame(2000, "a")], 3000, 25).len(), 25);
+    }
+
+    #[test]
+    fn the_video_is_never_shorter_than_one_frame() {
+        assert_eq!(plan(&[frame(500, "a")], 500, 25).len(), 1);
+        assert_eq!(
+            plan(&[frame(500, "a")], 100, 25).len(),
+            1,
+            "an end before the frame"
+        );
+    }
+
+    #[test]
+    fn of_two_frames_at_the_same_instant_the_later_one_is_shown() {
+        assert_eq!(plan(&[frame(10, "a"), frame(10, "b")], 110, 10), [1]);
+    }
+
+    #[test]
+    fn no_frames_make_no_ticks() {
+        assert!(plan(&[], 1000, 30).is_empty());
+    }
+
+    #[test]
+    fn the_length_follows_the_rate_not_the_number_of_frames() {
+        // 947 irregular frames in 20 s are still 600 ticks at 30 fps.
+        let frames: Vec<FrameMeta> = (0..947).map(|i| frame(i * 21, "f")).collect();
+        assert_eq!(plan(&frames, 20_000, 30).len(), 600);
     }
 }

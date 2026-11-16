@@ -5,15 +5,18 @@
 //! only (never the window, the toolbar or the rest of the screen): CDP's
 //! `Page.startScreencast` on the Chrome engine, and WebKit's own snapshot of the
 //! page on macOS. They go to disk as they arrive, each with the time it arrived,
-//! and `stop` encodes them with ffmpeg so the video runs in real time (see
-//! [`encode`]).
+//! and `stop` encodes them so the video runs in real time. The encoder that the
+//! OS has makes the mp4 ([`native`]: Media Foundation on Windows, AVFoundation on
+//! macOS), and ffmpeg ([`encode`]) is the fallback when the OS has none or it
+//! fails.
 //!
 //! One recording per daemon. It stops capturing by itself at `--max-seconds`
 //! (the frames are kept until `stop`), so a forgotten recording cannot fill a
-//! disk. Without ffmpeg `stop` fails *without* discarding the frames: install it
-//! and call `stop` again.
+//! disk. When no encoder works `stop` fails *without* discarding the frames: fix
+//! that (install ffmpeg) and call `stop` again.
 
 pub mod encode;
+pub mod native;
 #[cfg(target_os = "macos")]
 mod webkit;
 
@@ -500,47 +503,21 @@ pub async fn stop(site: &str, output: Option<&str>) -> Result<Value, Failure> {
         ));
     }
     // From here a failure keeps the frames, so the caller can fix it and retry.
-    let Some(ffmpeg) = encode::find_ffmpeg() else {
-        return Err(Failure::new(
-            "FFMPEG_NOT_FOUND",
-            format!(
-                "ffmpeg is needed to make the mp4 and was not found by this daemon (it looks in \
-                 the PATH and environment it was started with, then in /opt/homebrew/bin, \
-                 /usr/local/bin and /usr/bin). The {} captured frames are kept: put ffmpeg in one \
-                 of those folders (macOS: `brew install ffmpeg`) and run `screencast stop` again. \
-                 A new PATH or DALZZACK_FFMPEG reaches only a daemon started after it is set, and \
-                 stopping the daemon discards the frames.",
-                frames.len()
-            ),
-        ));
-    };
+    let choice = EncoderChoice::from_env()?;
     let output_path = resolve_output(site, output).await?;
     if let Some(parent) = output_path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
     let fps = session.options.fps;
-    let list = session.dir.join("frames.txt");
-    tokio::fs::write(&list, encode::concat_list(&frames, end_ms, fps))
-        .await
-        .map_err(|e| Failure::new("ENCODE_FAILED", format!("cannot write the frame list: {e}")))?;
-
-    let run = tokio::process::Command::new(&ffmpeg)
-        .args(encode::ffmpeg_args(&list, &output_path, fps))
-        .kill_on_drop(true)
-        .output();
-    let result = tokio::time::timeout(Duration::from_secs(600), run).await;
-    let output_ok = matches!(&result, Ok(Ok(o)) if o.status.success());
-    if !output_ok {
-        let detail = match result {
-            Ok(Ok(o)) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
-            Ok(Err(e)) => e.to_string(),
-            Err(_) => "ffmpeg did not finish within 10 minutes".to_string(),
-        };
-        return Err(Failure::new(
-            "ENCODE_FAILED",
-            format!("ffmpeg failed: {detail}. The frames are kept; `screencast stop` retries."),
-        ));
-    }
+    let (encoder, ffmpeg_encoder) = make_video(
+        choice,
+        &frames,
+        end_ms,
+        fps,
+        &output_path,
+        &session.dir.join("frames.txt"),
+    )
+    .await?;
 
     let size = tokio::fs::metadata(&output_path)
         .await
@@ -568,8 +545,224 @@ pub async fn stop(site: &str, output: Option<&str>) -> Result<Value, Failure> {
             Value::Null
         },
         "video_fps": fps,
+        "encoder": encoder,
+        "ffmpeg_encoder": ffmpeg_encoder,
         "ended_because": reason,
     }))
+}
+
+/// Which encoder `stop` may use. `DALZZACK_ENCODER` is `native` (the OS encoder
+/// only), `ffmpeg` (ffmpeg only) or not set: the OS encoder first, and ffmpeg
+/// when the OS has none or it fails.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EncoderChoice {
+    Auto,
+    Native,
+    Ffmpeg,
+}
+
+impl EncoderChoice {
+    fn from_env() -> Result<EncoderChoice, Failure> {
+        let value = std::env::var("DALZZACK_ENCODER").ok();
+        EncoderChoice::parse(value.as_deref())
+    }
+
+    fn parse(value: Option<&str>) -> Result<EncoderChoice, Failure> {
+        match value.map(str::trim) {
+            None | Some("") | Some("auto") => Ok(EncoderChoice::Auto),
+            Some("native") => Ok(EncoderChoice::Native),
+            Some("ffmpeg") => Ok(EncoderChoice::Ffmpeg),
+            Some(other) => Err(Failure::new(
+                "INVALID_OPTION",
+                format!(
+                    "DALZZACK_ENCODER is `{other}`; use `native`, `ffmpeg` or `auto` (or leave \
+                     it unset). The frames are kept."
+                ),
+            )),
+        }
+    }
+}
+
+const ENCODE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Make the mp4 and say which encoder made it: `native`, or `ffmpeg` and the name
+/// of the H.264 encoder that it used.
+async fn make_video(
+    choice: EncoderChoice,
+    frames: &[FrameMeta],
+    end_ms: u64,
+    fps: u32,
+    output: &std::path::Path,
+    list: &std::path::Path,
+) -> Result<(&'static str, Option<&'static str>), Failure> {
+    let attempt = if choice != EncoderChoice::Ffmpeg && native::SUPPORTED {
+        Some(encode_native(frames, end_ms, fps, output).await)
+    } else {
+        None
+    };
+    let native_failure = match after_native(choice, native::SUPPORTED, attempt) {
+        AfterNative::Done => return Ok(("native", None)),
+        AfterNative::Fail(failure) => return Err(failure),
+        AfterNative::UseFfmpeg { native_failure } => native_failure,
+    };
+
+    let Some(ffmpeg) = encode::find_ffmpeg() else {
+        return Err(ffmpeg_not_found(frames.len(), native_failure.as_deref()));
+    };
+    match encode_ffmpeg(&ffmpeg, frames, end_ms, fps, output, list).await {
+        Ok(codec) => Ok(("ffmpeg", Some(codec))),
+        Err(mut failure) => {
+            if let Some(detail) = native_failure {
+                failure.message.push_str(&format!(
+                    " (The built-in encoder had failed first: {detail}.)"
+                ));
+            }
+            Err(failure)
+        }
+    }
+}
+
+/// What `stop` does once the OS encoder has been tried (or skipped).
+#[derive(Debug)]
+enum AfterNative {
+    /// The OS encoder made the file.
+    Done,
+    /// Go on with ffmpeg. `native_failure` is why the OS encoder did not do it.
+    UseFfmpeg {
+        native_failure: Option<String>,
+    },
+    Fail(Failure),
+}
+
+/// `attempt` is the result of the OS encoder, or `None` when it was not tried.
+fn after_native(
+    choice: EncoderChoice,
+    supported: bool,
+    attempt: Option<Result<(), String>>,
+) -> AfterNative {
+    match (choice, attempt) {
+        (EncoderChoice::Ffmpeg, _) => AfterNative::UseFfmpeg {
+            native_failure: None,
+        },
+        (_, Some(Ok(()))) => AfterNative::Done,
+        (EncoderChoice::Native, Some(Err(detail))) => AfterNative::Fail(Failure::new(
+            "ENCODE_FAILED",
+            format!(
+                "the built-in encoder failed: {detail}. The frames are kept; `screencast stop` \
+                 retries."
+            ),
+        )),
+        (EncoderChoice::Native, None) => {
+            debug_assert!(!supported);
+            AfterNative::Fail(Failure::new(
+                "ENCODE_FAILED",
+                "DALZZACK_ENCODER=native, but this platform has no built-in encoder. The frames \
+                 are kept.",
+            ))
+        }
+        (EncoderChoice::Auto, Some(Err(detail))) => AfterNative::UseFfmpeg {
+            native_failure: Some(detail),
+        },
+        (EncoderChoice::Auto, None) => AfterNative::UseFfmpeg {
+            native_failure: None,
+        },
+    }
+}
+
+/// No ffmpeg, and the OS encoder did not make the file (it failed, or there is none).
+fn ffmpeg_not_found(frames: usize, native_failure: Option<&str>) -> Failure {
+    let tried = match native_failure {
+        Some(detail) => format!("The built-in encoder failed ({detail}) and ffmpeg"),
+        None => "ffmpeg is needed to make the mp4 here and it".to_string(),
+    };
+    Failure::new(
+        "FFMPEG_NOT_FOUND",
+        format!(
+            "{tried} was not found by this daemon (it looks in the PATH and environment it was \
+             started with, then in /opt/homebrew/bin, /usr/local/bin and /usr/bin). The {frames} \
+             captured frames are kept: put ffmpeg in one of those folders (macOS: `brew install \
+             ffmpeg`) and run `screencast stop` again. A new PATH or DALZZACK_FFMPEG reaches \
+             only a daemon started after it is set, and stopping the daemon discards the frames."
+        ),
+    )
+}
+
+/// The OS encoder, on a blocking thread. When it is too slow it is told to stop
+/// and awaited, so that nothing still writes the file when ffmpeg takes over.
+async fn encode_native(
+    frames: &[FrameMeta],
+    end_ms: u64,
+    fps: u32,
+    output: &std::path::Path,
+) -> Result<(), String> {
+    let frames = frames.to_vec();
+    let output = output.to_path_buf();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let mut work = tokio::task::spawn_blocking(move || {
+        native::encode(
+            &native::Job {
+                frames: &frames,
+                end_ms,
+                fps,
+                output: &output,
+            },
+            &flag,
+        )
+    });
+    match tokio::time::timeout(ENCODE_TIMEOUT, &mut work).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => Err(format!("the encoder stopped unexpectedly: {e}")),
+        Err(_) => {
+            cancel.store(true, Ordering::Relaxed);
+            let _ = work.await;
+            Err("the encoder did not finish within 10 minutes".to_string())
+        }
+    }
+}
+
+/// ffmpeg, with the best H.264 encoder that this build has. Returns its name.
+async fn encode_ffmpeg(
+    ffmpeg: &std::path::Path,
+    frames: &[FrameMeta],
+    end_ms: u64,
+    fps: u32,
+    output: &std::path::Path,
+    list: &std::path::Path,
+) -> Result<&'static str, Failure> {
+    let Some(h264) = encode::probe_h264(ffmpeg).await else {
+        return Err(Failure::new(
+            "ENCODE_FAILED",
+            format!(
+                "{} has no H.264 encoder that dalzzack can use (it needs libx264, libopenh264, \
+                 h264_videotoolbox or h264_mf). Use another ffmpeg build. The frames are kept; \
+                 `screencast stop` retries.",
+                ffmpeg.display()
+            ),
+        ));
+    };
+    tokio::fs::write(list, encode::concat_list(frames, end_ms, fps))
+        .await
+        .map_err(|e| Failure::new("ENCODE_FAILED", format!("cannot write the frame list: {e}")))?;
+
+    let ticks = encode::plan(frames, end_ms, fps).len();
+    let run = tokio::process::Command::new(ffmpeg)
+        .args(encode::ffmpeg_args(list, output, fps, ticks, h264))
+        .kill_on_drop(true)
+        .output();
+    let result = tokio::time::timeout(ENCODE_TIMEOUT, run).await;
+    if matches!(&result, Ok(Ok(o)) if o.status.success()) {
+        return Ok(h264.name());
+    }
+    let detail = match result {
+        Ok(Ok(o)) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        Ok(Err(e)) => e.to_string(),
+        Err(_) => "ffmpeg did not finish within 10 minutes".to_string(),
+    };
+    Err(Failure::new(
+        "ENCODE_FAILED",
+        format!("ffmpeg failed: {detail}. The frames are kept; `screencast stop` retries."),
+    ))
 }
 
 pub async fn status() -> Value {
