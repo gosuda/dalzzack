@@ -737,7 +737,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "screencast".to_string(),
-            description: "Record the page as an mp4: `start`, run any commands (scroll, click, navigate), then `stop` with `output`. Page only (not the window, toolbar or screen), in real time, one recording per instance. Needs ffmpeg for `stop` (`FFMPEG_NOT_FOUND` keeps the frames; install it and `stop` again). It stops capturing by itself at `max_seconds`. macOS default engine and `--engine chrome`; not the event tape (`record`).".to_string(),
+            description: "Record the page as an mp4: `start`, run any commands (scroll, click, navigate), then `stop` with `output`. Page only (not the window, toolbar or screen), in real time, one recording per instance. `stop` uses the encoder that the OS has (no ffmpeg needed), else ffmpeg (`FFMPEG_NOT_FOUND` keeps the frames; install it and `stop` again). It stops capturing by itself at `max_seconds`. macOS default engine and `--engine chrome`; not the event tape (`record`).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

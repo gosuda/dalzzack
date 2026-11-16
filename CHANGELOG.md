@@ -6,6 +6,30 @@ All notable changes to dalzzack. The format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- `screencast stop` makes the mp4 with the encoder that the OS has (Media Foundation
+  on Windows, AVFoundation on macOS), so ffmpeg is no longer needed. ffmpeg is the
+  fallback when the OS has none (a Windows N edition without the Media Feature Pack)
+  or it fails. `DALZZACK_ENCODER=native` or `ffmpeg` (set before `start`) allows
+  only that one. `stop` says which one made the file: `encoder`, and `ffmpeg_encoder`
+  when it was ffmpeg.
+- ffmpeg builds without libx264 work: `stop` picks the best H.264 encoder that the
+  build has (`libx264`, then `libopenh264`, `h264_videotoolbox`, `h264_mf`), so a
+  small LGPL build is enough. It used to need `libx264`.
+
+### Changed
+
+- The video's colours are converted and tagged as BT.709 (limited range) by both
+  encoders. ffmpeg used to convert with BT.601 and leave the file untagged, so a
+  player that assumes BT.709 for HD video showed shifted colours.
+
+### Fixed
+
+- A video made by ffmpeg ran one hold of the last frame longer than the recording
+  (0.3 s to 0.9 s in the tests): ffmpeg now writes exactly the frames of the
+  recorded span.
+
 ## [1.5.0] - 2026-11-15
 
 ### Added

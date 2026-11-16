@@ -440,7 +440,8 @@ enum Cli {
 
     /// Record the page as an mp4 (`screencast start`, any commands, `screencast stop --output
     /// a.mp4`). Page only, in real time. `record` is an event tape, not a recording.
-    /// Needs ffmpeg for `stop`; without it the frames are kept and `stop` can be run again.
+    /// `stop` uses the encoder that the OS has, else ffmpeg; with neither the frames are kept and
+    /// `stop` can be run again.
     /// Example: `screencast start`, `scroll --amount 300` (repeat), `screencast stop --output docs.mp4`
     Screencast {
         /// start | stop | status
