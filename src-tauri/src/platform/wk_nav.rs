@@ -34,6 +34,10 @@ static ORIGINAL_REDIRECTED: AtomicUsize = AtomicUsize::new(0);
 /// not part of the log.
 static PAGE: AtomicUsize = AtomicUsize::new(0);
 static TRACKER: Mutex<Tracker> = Mutex::new(Tracker::new());
+/// The main-frame navigation the tracker names, retained (a +1 this log owns), so
+/// WebKit cannot free it and give its address to a later navigation while the
+/// tracker still compares against that address. `0` when none.
+static HELD: AtomicUsize = AtomicUsize::new(0);
 
 /// The signature of both policy methods:
 /// `(self, _cmd, webView, navigationAction | navigationResponse, decisionHandler)`.
@@ -194,13 +198,31 @@ unsafe fn page_url(webview: *mut AnyObject) -> Option<String> {
     url_text(msg_send![webview, URL]).filter(|u| is_logged(u))
 }
 
+/// Runs `step`, the tracker's update for `navigation`, with that navigation kept
+/// alive. It is retained first; the one the tracker named before is released only
+/// after `step`, so the tracker never compares against an address that a newer,
+/// different navigation could have been given.
+unsafe fn while_tracked(navigation: *mut AnyObject, step: impl FnOnce()) {
+    if navigation.is_null() {
+        return step();
+    }
+    let _: *mut AnyObject = msg_send![navigation, retain];
+    step();
+    let previous = HELD.swap(navigation as usize, Ordering::SeqCst) as *mut AnyObject;
+    if !previous.is_null() {
+        let _: () = msg_send![previous, release];
+    }
+}
+
 unsafe fn on_started(webview: *mut AnyObject, navigation: *mut AnyObject) {
     if !is_page(webview) {
         return;
     }
     let Some(url) = page_url(webview) else { return };
     tracing::debug!("[wk-nav] started {navigation:?} {url}");
-    feed(|t| t.started(navigation as usize, &url));
+    while_tracked(navigation, || {
+        feed(|t| t.started(navigation as usize, &url));
+    });
 }
 
 unsafe fn on_redirected(webview: *mut AnyObject, navigation: *mut AnyObject) {
@@ -209,7 +231,9 @@ unsafe fn on_redirected(webview: *mut AnyObject, navigation: *mut AnyObject) {
     }
     let Some(url) = page_url(webview) else { return };
     tracing::debug!("[wk-nav] redirected {navigation:?} {url}");
-    feed(|t| t.redirected(navigation as usize, &url));
+    while_tracked(navigation, || {
+        feed(|t| t.redirected(navigation as usize, &url));
+    });
 }
 
 unsafe extern "C-unwind" fn decide_action(
