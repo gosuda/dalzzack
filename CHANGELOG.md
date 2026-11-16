@@ -20,6 +20,9 @@ All notable changes to dalzzack. The format loosely follows
 
 ### Changed
 
+- CI caches Rust dependencies per job and toolchain, runs release smoke checks
+  without waiting for debug builds, and cancels superseded runs. Release builds
+  also cache dependencies for retries. All existing platform checks remain.
 - The video's colours are converted and tagged as BT.709 (limited range) by both
   encoders. ffmpeg used to convert with BT.601 and leave the file untagged, so a
   player that assumes BT.709 for HD video showed shifted colours.
