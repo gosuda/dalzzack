@@ -532,7 +532,15 @@ pub fn run_with_instance_id(opts: AppOptions) {
     let landing_url_str = landing_data_url(&landing_id);
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+        // The opener plugin's script would take a `_blank` link click (and Ctrl/Shift
+        // clicks) and hand it to the system browser, which the page's own window
+        // never sees. Its commands are not granted to pages, so that path only ever
+        // failed; links stay with the engine.
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -550,7 +558,12 @@ pub fn run_with_instance_id(opts: AppOptions) {
             let close_id = instance_id_clone.clone();
             #[allow(unused_mut)]
             let mut builder =
-                WebviewWindowBuilder::new(&handle, "main", WebviewUrl::External(landing));
+                WebviewWindowBuilder::new(&handle, "main", WebviewUrl::External(landing))
+                    // A `window.open` or a named link target asks the engine for a new window.
+                    // Without an answer the engine drops the request and no window appears.
+                    // Allowed, the engine opens it as a window of its own, with the page's
+                    // session and `window.opener`.
+                    .on_new_window(|_, _| tauri::webview::NewWindowResponse::Allow);
 
             // Chromium flags (`--enable-heap-profiling`, `--js-flags=…`, …).
             // WebView2 only reads these at environment creation, so there is no

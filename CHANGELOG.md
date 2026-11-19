@@ -32,6 +32,10 @@ All notable changes to dalzzack. The format loosely follows
 - A video made by ffmpeg ran one hold of the last frame longer than the recording
   (0.3 s to 0.9 s in the tests): ffmpeg now writes exactly the frames of the
   recorded span.
+- On the default engine, a page's popups open a window: `window.open`, a link with a
+  named target, a `target="_blank"` link, and a Ctrl or Shift click on a link. They
+  used to open nothing. The popup has the page's session, and agent commands still
+  act on the main page only.
 
 ## [1.5.0] - 2026-11-15
 
