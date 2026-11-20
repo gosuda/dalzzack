@@ -285,3 +285,7 @@ Issues and PRs are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first. Repor
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+---
+
+[![Built with Depot](https://depot.dev/badges/built-with-depot.svg)](https://depot.dev?utm_source=gosuda)
