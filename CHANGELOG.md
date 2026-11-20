@@ -4,34 +4,16 @@ All notable changes to dalzzack. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [SemVer](https://semver.org).
 
-## [Unreleased]
-
-### Added
-
-- `screencast stop` makes the mp4 with the encoder that the OS has (Media Foundation
-  on Windows, AVFoundation on macOS), so ffmpeg is no longer needed. ffmpeg is the
-  fallback when the OS has none (a Windows N edition without the Media Feature Pack)
-  or it fails. `DALZZACK_ENCODER=native` or `ffmpeg` (set before `start`) allows
-  only that one. `stop` says which one made the file: `encoder`, and `ffmpeg_encoder`
-  when it was ffmpeg.
-- ffmpeg builds without libx264 work: `stop` picks the best H.264 encoder that the
-  build has (`libx264`, then `libopenh264`, `h264_videotoolbox`, `h264_mf`), so a
-  small LGPL build is enough. It used to need `libx264`.
+## [1.5.1] - 2026-11-19
 
 ### Changed
 
 - CI caches Rust dependencies per job and toolchain, runs release smoke checks
   without waiting for debug builds, and cancels superseded runs. Release builds
   also cache dependencies for retries. All existing platform checks remain.
-- The video's colours are converted and tagged as BT.709 (limited range) by both
-  encoders. ffmpeg used to convert with BT.601 and leave the file untagged, so a
-  player that assumes BT.709 for HD video showed shifted colours.
 
 ### Fixed
 
-- A video made by ffmpeg ran one hold of the last frame longer than the recording
-  (0.3 s to 0.9 s in the tests): ffmpeg now writes exactly the frames of the
-  recorded span.
 - On the default engine, a page's popups open a window: `window.open`, a link with a
   named target, a `target="_blank"` link, and a Ctrl or Shift click on a link. They
   used to open nothing. The popup has the page's session, and agent commands still
@@ -76,17 +58,32 @@ All notable changes to dalzzack. The format loosely follows
   again. Capture ends by itself at `--max-seconds` (default 120). While it records,
   the window's toolbar shows `REC` and the time. The Windows default engine
   answers `UNSUPPORTED_PLATFORM`; use `--engine chrome` there.
+- `screencast stop` makes the mp4 with the encoder that the OS has (Media Foundation
+  on Windows, AVFoundation on macOS), so ffmpeg is no longer needed. ffmpeg is the
+  fallback when the OS has none (a Windows N edition without the Media Feature Pack)
+  or it fails. `DALZZACK_ENCODER=native` or `ffmpeg` (set before `start`) allows
+  only that one. `stop` says which one made the file: `encoder`, and `ffmpeg_encoder`
+  when it was ffmpeg.
+- ffmpeg builds without libx264 work: `stop` picks the best H.264 encoder that the
+  build has (`libx264`, then `libopenh264`, `h264_videotoolbox`, `h264_mf`), so a
+  small LGPL build is enough. It used to need `libx264`.
 
 ### Changed
 
 - `scroll`'s `scrolled` is now the distance that was measured, not an echo of the
   distance asked for (that is `requested`). A scroll that moved nothing used to say
   `completed` with no sign of it.
+- The video's colours are converted and tagged as BT.709 (limited range) by both
+  encoders. ffmpeg used to convert with BT.601 and leave the file untagged, so a
+  player that assumes BT.709 for HD video showed shifted colours.
 
 ### Fixed
 
 - `scroll --selector` with a quote in the selector (`p[data-x='y']`) broke the
   script it was pasted into. The selector now travels as JSON.
+- A video made by ffmpeg ran one hold of the last frame longer than the recording
+  (0.3 s to 0.9 s in the tests): ffmpeg now writes exactly the frames of the
+  recorded span.
 
 ## [1.4.0] - 2026-11-12
 
