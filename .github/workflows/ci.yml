@@ -6,87 +6,52 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Share each native dependency build across lint, tests, and the debug binary.
 jobs:
-  fmt:
-    name: Format Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-
-  clippy:
-    name: Clippy
-    # Runs on macOS: the project targets macOS + Windows. The Linux platform
-    # backend (src/platform/js_exec.rs, mouse.rs) is an unbuilt stub, so linting
-    # the Linux cfg path would fail on code we don't ship.
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-
-  test:
-    name: Tests (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --lib --bins
-
   build:
-    name: Build (${{ matrix.os }})
+    name: Build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [depot-macos-latest, depot-windows-2025-4]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          components: rustfmt, clippy
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
           cache: npm
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-build-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-build-
-      - run: npm ci
+          workspaces: src-tauri -> target
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Check formatting
+        if: runner.os == 'macOS'
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - name: Clippy on the macOS platform backend
+        if: runner.os == 'macOS'
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Unit and binary tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib --bins
+      - run: npm ci --no-audit --no-fund
       - run: npm run build
-      - run: cargo build --manifest-path src-tauri/Cargo.toml
+      - run: cargo build --manifest-path src-tauri/Cargo.toml --locked
       # A throw-away runner is the only safe place for --purge on Windows:
       # dalzzack finds these folders through the Known Folder API, so a test
       # cannot redirect them.
@@ -117,45 +82,39 @@ jobs:
           if ($after -cne $before.TrimEnd(';')) { throw "The user Path changed: $after" }
 
   smoke:
-    name: Smoke (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest]
+    name: Smoke (depot-macos-latest)
+    runs-on: depot-macos-latest
+    timeout-minutes: 30
+    # Smoke builds the release profile itself; it consumes no debug-build output.
+    # rust-cache's job key keeps these dependencies separate from the debug cache.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-build-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-build-
-      - run: npm ci
-      - run: npm run deploy
+          workspaces: src-tauri -> target
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: cargo build --manifest-path src-tauri/Cargo.toml --release --locked
+      - run: npm run deploy -- --skip-build
       - name: Run smoke script (macOS)
-        if: runner.os == 'macOS'
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           bash scripts/smoke.sh
       # A local HTTPS fixture with a test CA: failed loads, --trust-cert, and
       # cookies on WKWebView. The public badssl.com sites stay out of CI.
       - name: Check certificates and cookies on WebKit (macOS)
-        if: runner.os == 'macOS'
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           LOCAL_ONLY=1 bash scripts/verify-webkit.sh
       # On a throw-away runner this measures the real folders under ~/Library.
       - name: Check that uninstall leaves nothing (macOS)
-        if: runner.os == 'macOS'
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           dalzzack install all
