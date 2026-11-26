@@ -17,64 +17,21 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Share each native dependency build across lint, tests, and the debug binary.
 jobs:
-  fmt:
-    name: Format Check
-    runs-on: depot-ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-
-  clippy:
-    name: Clippy
-    # Runs on macOS: the project targets macOS + Windows. The Linux platform
-    # backend (src/platform/js_exec.rs, mouse.rs) is an unbuilt stub, so linting
-    # the Linux cfg path would fail on code we don't ship.
-    runs-on: depot-macos-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: src-tauri -> target
-          cache-bin: false
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
-
-  test:
-    name: Tests (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [depot-macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: src-tauri -> target
-          cache-bin: false
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib --bins
-
   build:
-    name: Build (${{ matrix.os }})
+    name: Build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [depot-macos-latest, windows-latest]
+        os: [depot-macos-latest, depot-windows-2025-4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -83,6 +40,15 @@ jobs:
         with:
           workspaces: src-tauri -> target
           cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Check formatting
+        if: runner.os == 'macOS'
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - name: Clippy on the macOS platform backend
+        if: runner.os == 'macOS'
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Unit and binary tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib --bins
       - run: npm ci --no-audit --no-fund
       - run: npm run build
       - run: cargo build --manifest-path src-tauri/Cargo.toml --locked
@@ -132,6 +98,7 @@ jobs:
         with:
           workspaces: src-tauri -> target
           cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - run: npm ci --no-audit --no-fund
       - run: npm run build
       - run: cargo build --manifest-path src-tauri/Cargo.toml --release --locked

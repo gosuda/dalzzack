@@ -4,6 +4,15 @@ All notable changes to dalzzack. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [SemVer](https://semver.org).
 
+## [Unreleased]
+
+### Changed
+
+- CI shares each platform's setup across formatting, lint, tests, and debug
+  builds, reducing routine jobs from seven to three. CI and release jobs now
+  use Depot runners; macOS uses `depot-macos-latest`. Native Windows checks,
+  WebKit smoke checks, and both release platforms remain covered.
+
 ## [1.5.1] - 2026-11-19
 
 ### Changed
