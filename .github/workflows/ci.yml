@@ -34,7 +34,7 @@ jobs:
     # Runs on macOS: the project targets macOS + Windows. The Linux platform
     # backend (src/platform/js_exec.rs, mouse.rs) is an unbuilt stub, so linting
     # the Linux cfg path would fail on code we don't ship.
-    runs-on: macos-latest
+    runs-on: depot-macos-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,7 +54,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [depot-macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
@@ -71,7 +71,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [depot-macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
@@ -116,8 +116,8 @@ jobs:
           if ($after -cne $before.TrimEnd(';')) { throw "The user Path changed: $after" }
 
   smoke:
-    name: Smoke (macos-latest)
-    runs-on: macos-latest
+    name: Smoke (depot-macos-latest)
+    runs-on: depot-macos-latest
     timeout-minutes: 30
     # Smoke builds the release profile itself; it consumes no debug-build output.
     # rust-cache's job key keeps these dependencies separate from the debug cache.
